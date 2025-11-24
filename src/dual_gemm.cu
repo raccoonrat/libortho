@@ -96,8 +96,8 @@ __device__ float compute_dense_tile(
  * We iterate through a pre-computed list of "active" indices 
  * for this thread block.
  * 
- * Optimization: Use binary search or sorted indices for better cache behavior.
- * For now, linear search with early exit optimization.
+ * Optimization: Indices are pre-sorted by row (done offline in sieve.py).
+ * This enables early exit when we've passed the current row.
  */
 __device__ float compute_sparse_patch(
     const float* ortho_values,
@@ -109,17 +109,30 @@ __device__ float compute_sparse_patch(
 ) {
     float acc = 0.0f;
     
-    // Optimized: process indices that match this output row
-    // Assuming indices are sorted or grouped by row (should be done offline)
+    // Indices are pre-sorted by row (then column) in sieve.py
+    // Find the start of this row using binary search (if count is large)
+    // For now, use linear search with early exit
+    
+    int start_idx = 0;
+    int end_idx = ortho_count;
+    
+    // Find first index >= out_idx (binary search would be better for large counts)
+    // For now, linear search is acceptable for typical sparse counts
     for (int i = 0; i < ortho_count; i++) {
         uint16_t flat_idx = ortho_indices[i];
         int row = flat_idx / in_features;
-        int col = flat_idx % in_features;
         
-        // Early exit if we've passed this row (requires sorted indices)
-        // For now, check all indices
-        if (row == out_idx && col < in_features) {
-            acc += ortho_values[i] * input[col];
+        // Early exit: if we've passed this row, no more matches
+        if (row > out_idx) {
+            break;
+        }
+        
+        // Process if this index belongs to our row
+        if (row == out_idx) {
+            int col = flat_idx % in_features;
+            if (col < in_features) {
+                acc += ortho_values[i] * input[col];
+            }
         }
     }
     

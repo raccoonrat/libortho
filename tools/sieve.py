@@ -109,23 +109,46 @@ def pack_ortho_sparse(
     """
     Pack orthogonal component into sparse format.
     
+    Pre-sorted indices minimize memory jumps (as required by Linus's design).
+    Indices are sorted by row first, then by column within each row.
+    This enables early exit optimization in CUDA kernels.
+    
     Args:
         w_ortho: Sparse orthogonal weights [out_features, in_features]
         format: Sparse format ("coo" for coordinate, "csr" for CSR)
     
     Returns:
-        indices: Sparse indices
-        values: Non-zero values
+        indices: Sparse indices (sorted by row, then column)
+        values: Non-zero values (corresponding to sorted indices)
     """
     if format == "coo":
         # Coordinate format: flat indices
         mask = w_ortho != 0
         flat_indices = torch.nonzero(mask, as_tuple=False)
-        # Convert (row, col) to flat index
-        in_features = w_ortho.shape[1]
-        indices = flat_indices[:, 0] * in_features + flat_indices[:, 1]
+        
+        # Get row and column indices
+        rows = flat_indices[:, 0]
+        cols = flat_indices[:, 1]
         values = w_ortho[mask]
-        return indices.to(torch.uint16), values
+        
+        # Sort by row first, then by column within each row
+        # This minimizes memory jumps and enables early exit in kernels
+        in_features = w_ortho.shape[1]
+        
+        # Create sort key: row * large_number + col
+        # This ensures row-major ordering
+        sort_key = rows * in_features + cols
+        
+        # Sort indices and values together
+        sorted_indices = torch.argsort(sort_key)
+        rows_sorted = rows[sorted_indices]
+        cols_sorted = cols[sorted_indices]
+        values_sorted = values[sorted_indices]
+        
+        # Convert to flat index
+        indices = rows_sorted * in_features + cols_sorted
+        
+        return indices.to(torch.uint16), values_sorted
     else:
         raise ValueError(f"Unsupported format: {format}")
 

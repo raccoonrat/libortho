@@ -128,10 +128,12 @@ void generate_test_data(
     memcpy(layer->base.q_scales, scales, DIM * sizeof(float));
     
     // Generate sparse ortho weights
+    // Use aligned allocation (128-byte) as required by design
     int ortho_count = DIM * DIM / 20;  // 5% sparsity
-    layer->ortho.count = ortho_count;
-    layer->ortho.indices = (uint16_t*)malloc(ortho_count * sizeof(uint16_t));
-    layer->ortho.values = (float*)malloc(ortho_count * sizeof(float));
+    if (orth_layer_alloc_ortho(layer, ortho_count) != 0) {
+        fprintf(stderr, "Failed to allocate ortho weights\n");
+        return -1;
+    }
     
     for (int i = 0; i < ortho_count; i++) {
         layer->ortho.indices[i] = (uint16_t)(rand() % (DIM * DIM));

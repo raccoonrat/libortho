@@ -78,6 +78,24 @@ void orth_layer_free(orth_layer_t *layer);
 void orth_layer_set_alpha(orth_layer_t *layer, float alpha);
 
 /*
+ * Allocate Ortho component with 128-byte alignment
+ * Memory alignment is critical for Memory Controller efficiency
+ * 
+ * Args:
+ *   layer: Layer structure
+ *   count: Number of non-zero elements
+ * 
+ * Returns:
+ *   0 on success, -1 on failure
+ */
+int orth_layer_alloc_ortho(orth_layer_t *layer, size_t count);
+
+/*
+ * Free Ortho component (with aligned memory)
+ */
+void orth_layer_free_ortho(orth_layer_t *layer);
+
+/*
  * Forward pass: Y = X @ W_base + alpha * (X @ W_ortho)
  * 
  * This is the fused kernel interface.

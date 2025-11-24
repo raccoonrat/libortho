@@ -98,14 +98,8 @@ void orth_layer_free(orth_layer_t *layer) {
     free(layer->base.q_scales);
 #endif
     
-    // Only free if they were allocated (not NULL)
-    // This allows external allocation (like in tests)
-    if (layer->ortho.indices) {
-        free(layer->ortho.indices);
-    }
-    if (layer->ortho.values) {
-        free(layer->ortho.values);
-    }
+    // Free ortho using aligned free
+    orth_layer_free_ortho(layer);
     
     memset(layer, 0, sizeof(orth_layer_t));
 }
@@ -114,6 +108,89 @@ void orth_layer_set_alpha(orth_layer_t *layer, float alpha) {
     if (layer) {
         layer->alpha = alpha;
     }
+}
+
+int orth_layer_alloc_ortho(orth_layer_t *layer, size_t count) {
+    if (!layer || count == 0) {
+        return -1;
+    }
+    
+    // Free existing ortho if any
+    orth_layer_free_ortho(layer);
+    
+    // Allocate indices with 128-byte alignment
+    size_t indices_size = count * sizeof(uint16_t);
+    size_t aligned_indices_size = (indices_size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+#ifdef _WIN32
+    layer->ortho.indices = (uint16_t*)_aligned_malloc(aligned_indices_size, ALIGNMENT);
+#else
+    if (posix_memalign((void**)&layer->ortho.indices, ALIGNMENT, aligned_indices_size) != 0) {
+        return -1;
+    }
+#endif
+    if (!layer->ortho.indices) {
+        return -1;
+    }
+    memset(layer->ortho.indices, 0, aligned_indices_size);
+    
+    // Allocate values with 128-byte alignment
+    size_t values_size = count * sizeof(float);
+    size_t aligned_values_size = (values_size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+#ifdef _WIN32
+    layer->ortho.values = (float*)_aligned_malloc(aligned_values_size, ALIGNMENT);
+#else
+    if (posix_memalign((void**)&layer->ortho.values, ALIGNMENT, aligned_values_size) != 0) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.indices);
+#else
+        free(layer->ortho.indices);
+#endif
+        return -1;
+    }
+#endif
+    if (!layer->ortho.values) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.indices);
+#else
+        free(layer->ortho.indices);
+#endif
+        return -1;
+    }
+    memset(layer->ortho.values, 0, aligned_values_size);
+    
+    layer->ortho.count = count;
+    layer->ortho.capacity = count;
+    
+    return 0;
+}
+
+void orth_layer_free_ortho(orth_layer_t *layer) {
+    if (!layer) {
+        return;
+    }
+    
+    if (layer->ortho.indices) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.indices);
+#else
+        free(layer->ortho.indices);
+#endif
+        layer->ortho.indices = NULL;
+    }
+    
+    if (layer->ortho.values) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.values);
+#else
+        free(layer->ortho.values);
+#endif
+        layer->ortho.values = NULL;
+    }
+    
+    layer->ortho.count = 0;
+    layer->ortho.capacity = 0;
 }
 
 // Helper: Unpack INT4 value from packed array

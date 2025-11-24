@@ -79,19 +79,12 @@ class OrthoLinear(nn.Module):
         """
         self.base_weight.data = base_weight.to(self.base_weight.dtype)
         
-        # Pack ortho into sparse format
-        mask = ortho_weight != 0
-        if mask.any():
-            flat_indices = torch.nonzero(mask, as_tuple=False)
-            in_features = ortho_weight.shape[1]
-            indices = (flat_indices[:, 0] * in_features + flat_indices[:, 1]).to(torch.uint16)
-            values = ortho_weight[mask].to(torch.float16)
-            
-            self.ortho_indices = indices
-            self.ortho_values = values
-        else:
-            self.ortho_indices = torch.tensor([], dtype=torch.uint16)
-            self.ortho_values = torch.tensor([], dtype=torch.float16)
+        # Pack ortho into sparse format (using sieve.py function for consistency)
+        from tools.sieve import pack_ortho_sparse
+        indices, values = pack_ortho_sparse(ortho_weight, format="coo")
+        
+        self.ortho_indices = indices.to(self.ortho_indices.device) if indices.numel() > 0 else torch.tensor([], dtype=torch.uint16, device=self.ortho_indices.device)
+        self.ortho_values = values.to(self.ortho_values.device) if values.numel() > 0 else torch.tensor([], dtype=torch.float16, device=self.ortho_values.device)
         
         if base_scales is not None:
             self.base_scales.data = base_scales.to(self.base_scales.dtype)
@@ -99,6 +92,9 @@ class OrthoLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
+        
+        Optimized: Direct sparse computation without reconstructing full matrix.
+        This avoids O(n*m) memory allocation and is much faster.
         
         Args:
             x: Input tensor [batch, ..., in_features]
@@ -109,29 +105,41 @@ class OrthoLinear(nn.Module):
         # Reshape for matrix multiplication
         original_shape = x.shape
         x = x.view(-1, x.shape[-1])
+        batch_size = x.shape[0]
         
         # Base stream: quantized matrix multiplication
         # Simplified: in real implementation, this would use INT4 kernels
         base_out = F.linear(x, self.base_weight.float(), None)
         
-        # Ortho stream: sparse matrix multiplication
+        # Ortho stream: sparse matrix multiplication (optimized)
         if self.alpha.item() > 0.0 and self.ortho_values.numel() > 0:
-            # Reconstruct sparse matrix
-            ortho_matrix = torch.zeros(
-                self.out_features,
-                self.in_features,
-                dtype=torch.float32,
-                device=x.device
-            )
+            # Direct sparse computation: Y[row] += alpha * values[i] * x[col]
+            # This is O(k) where k is the number of non-zeros, vs O(n*m) for dense
+            ortho_out = torch.zeros_like(base_out)
             
+            # Convert indices to row/col (indices are pre-sorted by row from sieve.py)
             in_features = self.in_features
-            for i, idx in enumerate(self.ortho_indices):
-                row = idx.item() // in_features
-                col = idx.item() % in_features
-                ortho_matrix[row, col] = self.ortho_values[i].item()
+            rows = (self.ortho_indices // in_features).long()
+            cols = (self.ortho_indices % in_features).long()
             
-            ortho_out = F.linear(x, ortho_matrix, None)
-            output = base_out + self.alpha.item() * ortho_out
+            # Use batched computation: gather x[col] for all non-zeros
+            # Then use index_add_ for efficient accumulation
+            alpha_val = self.alpha.item()
+            values = self.ortho_values.float() * alpha_val
+            
+            # Gather input values: x[:, cols] -> [batch, k]
+            x_gathered = x[:, cols]  # [batch, k]
+            
+            # Multiply by values: [batch, k] * [k] -> [batch, k]
+            weighted = x_gathered * values.unsqueeze(0)  # [batch, k]
+            
+            # Accumulate to output rows using index_add_ (vectorized per batch)
+            # This is much more efficient than reconstructing the full matrix
+            rows_long = rows.long()  # Ensure correct dtype for index_add_
+            for b in range(batch_size):
+                ortho_out[b].index_add_(0, rows_long, weighted[b])
+            
+            output = base_out + ortho_out
         else:
             output = base_out
         
