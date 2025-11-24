@@ -186,16 +186,17 @@ __global__ void dual_gemm_kernel(
 }
 
 /*
- * Check Tensor Core availability
+ * Forward declarations for Tensor Core functions
+ * Implementations in dual_gemm_tensor_core.cu
  */
-bool check_tensor_core_support() {
-    int device = 0;
-    cudaDeviceProp prop;
-    if (cudaGetDeviceProperties(&prop, device) != cudaSuccess) {
-        return false;
-    }
-    // Tensor Cores available on compute capability >= 7.0
-    return (prop.major >= 7);
+extern "C" {
+    bool check_tensor_core_support();
+    int orth_layer_forward_tensor_core(
+        const orth_layer_t* layer,
+        const float* input,
+        float* output,
+        size_t batch_size
+    );
 }
 
 /*
@@ -213,8 +214,16 @@ extern "C" int orth_layer_forward_cuda(
     }
     
     // Try Tensor Core first if available
-    // For now, use standard kernel
-    // Tensor Core version can be enabled when fully implemented
+    // Note: Tensor Core implementation is framework version
+    // For production, consider using CUTLASS library
+    if (check_tensor_core_support()) {
+        // Try Tensor Core version (may fallback if not fully implemented)
+        int result = orth_layer_forward_tensor_core(layer, input, output, batch_size);
+        if (result == 0) {
+            return 0;  // Tensor Core succeeded
+        }
+        // Fall through to standard kernel if Tensor Core failed
+    }
     
     dim3 block_size(1, 32);  // Adjust based on hardware
     dim3 grid_size(batch_size, (layer->base.out_features + block_size.y - 1) / block_size.y);
