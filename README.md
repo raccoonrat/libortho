@@ -104,6 +104,26 @@ pip install -e .
 
 **注意**: CUDA 支持需要 WSL 中安装 CUDA Toolkit 或 Windows 中安装 CUDA。
 
+## 测试
+
+### 运行所有测试
+
+```bash
+cd tests
+chmod +x run_all_tests.sh
+./run_all_tests.sh
+```
+
+这将运行：
+- GPU 环境检查
+- CUDA kernel 测试（如果 GPU 可用）
+- CPU forward 测试
+- 性能基准测试（Null Test）
+
+详细说明请参考：
+- `tests/TESTING_GUIDE.md` - 完整测试指南
+- `tests/QUICK_TEST.md` - 快速测试指南
+
 ## 设计原则
 
 1. **拒绝过度设计**：没有抽象工厂，只有 `weight` 和 `residual`
