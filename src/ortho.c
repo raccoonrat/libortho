@@ -14,6 +14,7 @@
 #include <malloc.h>
 #else
 #include <stdlib.h>
+#define _POSIX_C_SOURCE 200809L  // For posix_memalign
 #endif
 
 int orth_layer_init(orth_layer_t *layer, 
@@ -96,8 +97,15 @@ void orth_layer_free(orth_layer_t *layer) {
     free(layer->base.q_weight);
     free(layer->base.q_scales);
 #endif
-    free(layer->ortho.indices);
-    free(layer->ortho.values);
+    
+    // Only free if they were allocated (not NULL)
+    // This allows external allocation (like in tests)
+    if (layer->ortho.indices) {
+        free(layer->ortho.indices);
+    }
+    if (layer->ortho.values) {
+        free(layer->ortho.values);
+    }
     
     memset(layer, 0, sizeof(orth_layer_t));
 }
