@@ -117,8 +117,9 @@ void orth_layer_set_alpha(orth_layer_t *layer, float alpha) {
 }
 
 // Helper: Unpack INT4 value from packed array
-static inline int8_t unpack_int4(const uint8_t *packed, int idx) {
-    int byte_idx = idx / 2;
+// Force inline for performance (critical path)
+static inline __attribute__((always_inline)) int8_t unpack_int4(const uint8_t *packed, size_t idx) {
+    size_t byte_idx = idx / 2;
     int bit_offset = (idx % 2) * 4;
     uint8_t byte = packed[byte_idx];
     int8_t val = (byte >> bit_offset) & 0x0F;
@@ -143,8 +144,9 @@ int orth_layer_forward(const orth_layer_t *layer,
     const uint8_t *q_weight = (const uint8_t *)layer->base.q_weight;
     const float *q_scales = (const float *)layer->base.q_scales;
     
-    // Zero output
-    memset(output, 0, batch_size * out_features * sizeof(float));
+    // Fast path: No Ortho contribution (alpha=0 or empty ortho)
+    // This should be COMPLETELY EQUAL to reference implementation
+    int has_ortho = (layer->alpha > 0.0f && layer->ortho.count > 0);
     
     // Process each batch
     for (size_t b = 0; b < batch_size; b++) {
@@ -152,30 +154,43 @@ int orth_layer_forward(const orth_layer_t *layer,
         float *y = output + b * out_features;
         
         // Compute Base: Y = X @ W_base (INT4 quantized)
-        for (size_t out = 0; out < out_features; out++) {
-            float acc = 0.0f;
-            float scale = q_scales[out];
-            
-            // Dequantize and compute dot product
-            for (size_t in = 0; in < in_features; in++) {
-                int8_t w_int;
-                if (q_bits == 4) {
-                    w_int = unpack_int4(q_weight, out * in_features + in);
-                } else {
-                    // Fallback for other bit widths (simplified)
-                    int byte_idx = (out * in_features + in) * q_bits / 8;
-                    w_int = ((int8_t *)q_weight)[byte_idx];
+        // Optimized: assume q_bits == 4 (most common case)
+        if (q_bits == 4) {
+            // Fast path: INT4 without branch in inner loop
+            for (size_t out = 0; out < out_features; out++) {
+                float acc = 0.0f;
+                float scale = q_scales[out];
+                size_t weight_base = out * in_features;
+                
+                // Unroll-friendly loop
+                for (size_t in = 0; in < in_features; in++) {
+                    size_t idx = weight_base + in;
+                    int8_t w_int = unpack_int4(q_weight, idx);
+                    acc += x[in] * ((float)w_int * scale);
                 }
-                float w = (float)w_int * scale;
-                acc += x[in] * w;
+                y[out] = acc;
             }
-            y[out] = acc;
+        } else {
+            // Fallback for other bit widths
+            for (size_t out = 0; out < out_features; out++) {
+                float acc = 0.0f;
+                float scale = q_scales[out];
+                
+                for (size_t in = 0; in < in_features; in++) {
+                    int byte_idx = (out * in_features + in) * q_bits / 8;
+                    int8_t w_int = ((int8_t *)q_weight)[byte_idx];
+                    acc += x[in] * ((float)w_int * scale);
+                }
+                y[out] = acc;
+            }
         }
         
         // Compute Ortho: Y += alpha * (X @ W_ortho) (sparse)
-        if (layer->alpha > 0.0f && layer->ortho.count > 0) {
+        // Only if needed (branch outside inner loops)
+        if (has_ortho) {
             const float *ortho_values = layer->ortho.values;
             const uint16_t *ortho_indices = layer->ortho.indices;
+            float alpha = layer->alpha;
             
             for (int i = 0; i < layer->ortho.count; i++) {
                 uint16_t flat_idx = ortho_indices[i];
@@ -183,7 +198,7 @@ int orth_layer_forward(const orth_layer_t *layer,
                 size_t col = flat_idx % in_features;
                 
                 if (row < out_features && col < in_features) {
-                    y[row] += layer->alpha * ortho_values[i] * x[col];
+                    y[row] += alpha * ortho_values[i] * x[col];
                 }
             }
         }

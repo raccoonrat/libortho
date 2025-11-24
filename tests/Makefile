@@ -1,7 +1,7 @@
 # Makefile for libortho CPU tests
 
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -g -std=c11
+CFLAGS = -Wall -Wextra -O3 -g -std=c11 -D_POSIX_C_SOURCE=200809L -ffast-math -funroll-loops
 INCLUDES = -I../include
 LDFLAGS = -lm
 

@@ -6,6 +6,8 @@
  * If supporting the sparse stream causes the Base stream to slow down by 1%, it's a failure.
  */
 
+#define _POSIX_C_SOURCE 200809L  // For clock_gettime and CLOCK_MONOTONIC
+
 #include "../include/ortho.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,16 @@
 #define ITERATIONS 100
 #define Q_BITS 4
 
+// Unpack INT4 helper function
+static inline int8_t unpack_int4_ref(const uint8_t* packed, int idx) {
+    int byte_idx = idx / 2;
+    int bit_offset = (idx % 2) * 4;
+    uint8_t byte = packed[byte_idx];
+    int8_t val = (byte >> bit_offset) & 0x0F;
+    if (val & 0x08) val |= 0xF0;
+    return val;
+}
+
 // Simple INT4 matrix multiplication (reference implementation)
 void reference_int4_gemm(
     const uint8_t* q_weight_packed,
@@ -29,15 +41,6 @@ void reference_int4_gemm(
     int in_features,
     int out_features
 ) {
-    // Unpack INT4 helper (forward declaration)
-    static inline int8_t unpack_int4_ref(const uint8_t* packed, int idx) {
-        int byte_idx = idx / 2;
-        int bit_offset = (idx % 2) * 4;
-        uint8_t byte = packed[byte_idx];
-        int8_t val = (byte >> bit_offset) & 0x0F;
-        if (val & 0x08) val |= 0xF0;
-        return val;
-    }
     
     for (int b = 0; b < batch_size; b++) {
         const float* x = input + b * in_features;
