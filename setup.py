@@ -24,12 +24,13 @@ HAS_CUDA = check_cuda()
 ext_modules = []
 
 if HAS_CUDA:
-    # CUDA extension
+    # CUDA extension with Tensor Core support
     ext_modules.append(
         Pybind11Extension(
             "libortho._C_ops",
             [
                 "src/dual_gemm.cu",
+                "src/dual_gemm_tensor_core.cu",  # Tensor Core implementation
                 "torch_bind/bindings.cpp",
             ],
             include_dirs=[
@@ -40,7 +41,15 @@ if HAS_CUDA:
             cxx_std=17,
             extra_compile_args={
                 'cxx': ['-O3', '-std=c++17'],
-                'nvcc': ['-O3', '--use_fast_math', '-arch=sm_75', '-arch=sm_80', '-arch=sm_86']
+                'nvcc': [
+                    '-O3', 
+                    '--use_fast_math',
+                    '-arch=sm_75',  # Turing (Tensor Core INT8)
+                    '-arch=sm_80',  # Ampere
+                    '-arch=sm_86',  # Ampere (consumer)
+                    '-arch=sm_89',  # Ada Lovelace
+                    '--expt-relaxed-constexpr'  # For WMMA API
+                ]
             },
             libraries=['cudart', 'cublas'],
         )

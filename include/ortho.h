@@ -96,6 +96,20 @@ int orth_layer_forward_cuda(const orth_layer_t *layer,
                             const float *input,
                             float *output,
                             size_t batch_size);
+
+/*
+ * Tensor Core-accelerated forward pass (if Tensor Cores available)
+ * Requires compute capability >= 7.0
+ */
+int orth_layer_forward_tensor_core(const orth_layer_t *layer,
+                                   const float *input,
+                                   float *output,
+                                   size_t batch_size);
+
+/*
+ * Check if Tensor Cores are available
+ */
+bool check_tensor_core_support(void);
 #endif
 
 #ifdef __cplusplus
