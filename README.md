@@ -39,11 +39,21 @@ libortho/
 
 ## 快速开始
 
+### WSL 环境运行（推荐）
+
+如果你使用 WSL (Windows Subsystem for Linux)，请参考：
+- **详细指南**: `experiments/WSL_SETUP.md`
+- **快速运行**: `./experiments/run_all_experiments.sh`
+
 ### 1. 验证核心逻辑
 
 运行最小验证脚本：
 
 ```bash
+# 在 WSL 中
+python3 experiments/verify_core_logic.py
+
+# 或在 Windows 中（如果已配置）
 python experiments/verify_core_logic.py
 ```
 
@@ -75,9 +85,24 @@ output = layer(input)
 
 ## 构建
 
+### 在 WSL 中
+
 ```bash
+# 安装依赖
+pip3 install torch numpy pybind11
+
+# 安装包（开发模式）
+pip3 install -e .
+```
+
+### 在 Windows 中
+
+```bash
+pip install torch numpy pybind11
 pip install -e .
 ```
+
+**注意**: CUDA 支持需要 WSL 中安装 CUDA Toolkit 或 Windows 中安装 CUDA。
 
 ## 设计原则
 
