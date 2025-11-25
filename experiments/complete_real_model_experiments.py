@@ -43,6 +43,69 @@ except ImportError:
     from verify_core_logic import quantize_int4_sim, compute_hessian_diag
 
 
+def load_tokenizer_robust(model_name: str) -> AutoTokenizer:
+    """
+    Load tokenizer with multiple fallback methods to handle various model formats.
+    """
+    tokenizer = None
+    tokenizer_methods = [
+        # Method 1: Standard AutoTokenizer
+        {
+            "func": lambda: AutoTokenizer.from_pretrained(
+                model_name,
+                local_files_only=False,
+                trust_remote_code=True,
+            ),
+            "name": "AutoTokenizer (standard)"
+        },
+        # Method 2: Without fast tokenizer
+        {
+            "func": lambda: AutoTokenizer.from_pretrained(
+                model_name,
+                local_files_only=False,
+                trust_remote_code=True,
+                use_fast=False,
+            ),
+            "name": "AutoTokenizer (use_fast=False)"
+        },
+        # Method 3: Try LlamaTokenizer specifically
+        {
+            "func": lambda: __import__('transformers', fromlist=['LlamaTokenizer']).LlamaTokenizer.from_pretrained(
+                model_name,
+                local_files_only=False,
+                trust_remote_code=True,
+            ),
+            "name": "LlamaTokenizer"
+        },
+    ]
+    
+    for method in tokenizer_methods:
+        try:
+            tokenizer = method["func"]()
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            print(f"✅ Tokenizer loaded using {method['name']}")
+            break
+        except Exception as e:
+            print(f"⚠️  {method['name']} failed: {e}")
+            continue
+    
+    if tokenizer is None:
+        print("❌ All tokenizer loading methods failed")
+        print("\nTroubleshooting:")
+        if os.path.isdir(model_name):
+            print(f"1. Check if tokenizer files exist in: {model_name}")
+            print("2. Ensure tokenizer.json or tokenizer_config.json exists")
+            print("3. Try re-downloading the model from HuggingFace")
+            print("4. Run: python experiments/diagnose_model.py")
+        else:
+            print("1. Check HuggingFace authentication: huggingface-cli login")
+            print("2. Check network connection")
+        raise RuntimeError("Failed to load tokenizer with all methods")
+    
+    return tokenizer
+
+
 class RealModelLibOrtho:
     """
     Wrapper for real model with LibOrtho separation.
@@ -93,6 +156,10 @@ class RealModelLibOrtho:
             max_length=512,
         ).to(self.device)
         
+        # Get input embeddings for Hessian computation
+        # For simplicity, we'll use a simplified Hessian approximation
+        # based on weight statistics rather than full forward pass
+        
         # Process each linear layer
         total_params = 0
         ortho_params = 0
@@ -102,17 +169,19 @@ class RealModelLibOrtho:
                 # Get weight matrix [out_features, in_features]
                 weight = module.weight.data
                 
-                # Compute Hessian diagonal approximation
-                # Use activations from previous layer
+                # Compute simplified Hessian diagonal approximation
+                # For real models, we use weight-based approximation:
+                # H_diag ≈ diag(W^T W) / in_features
+                # This is a simplified approximation that works well in practice
                 with torch.no_grad():
-                    # Forward pass to get activations
-                    # For simplicity, use weight matrix directly
-                    # In practice, would use actual activations
-                    inputs_for_hessian = weight.T  # [in_features, out_features]
-                    
-                    # Compute Hessian diagonal
                     if name not in self.hessian_cache:
-                        H_diag = compute_hessian_diag_approx(inputs_for_hessian)
+                        # Use weight-based approximation
+                        # H_diag[i] ≈ sum(W[:, i]^2) / in_features
+                        # This approximates the curvature based on weight magnitudes
+                        weight_squared = weight ** 2  # [out_features, in_features]
+                        H_diag = weight_squared.sum(dim=0) / weight.shape[0]  # [in_features]
+                        # Add small epsilon to avoid division by zero
+                        H_diag = H_diag + 1e-6
                         self.hessian_cache[name] = H_diag
                     else:
                         H_diag = self.hessian_cache[name]
@@ -239,9 +308,7 @@ class Experiment1_KillSwitch:
             load_kwargs["local_files_only"] = False  # Allow downloading configs
         
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = load_tokenizer_robust(model_name)
         
         self.model.eval()
         
@@ -399,9 +466,7 @@ class Experiment2_NullTest:
             load_kwargs["local_files_only"] = False
         
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = load_tokenizer_robust(model_name)
         
         self.model.eval()
         
@@ -534,9 +599,7 @@ class Experiment3_SavingGenius:
             load_kwargs["local_files_only"] = False
         
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = load_tokenizer_robust(model_name)
         
         self.model.eval()
         self.libortho = RealModelLibOrtho(self.model, self.tokenizer, device)
@@ -683,9 +746,7 @@ class Experiment4_Performance:
             load_kwargs["local_files_only"] = False
         
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = load_tokenizer_robust(model_name)
         
         self.model.eval()
         self.libortho = RealModelLibOrtho(self.model, self.tokenizer, device)
