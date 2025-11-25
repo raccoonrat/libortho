@@ -44,6 +44,44 @@ except ImportError:
 class GTX4050RealModelExperimentBase:
     """Base class for real model experiments optimized for GTX 4050 (6GB VRAM)."""
     
+    @staticmethod
+    def _load_tokenizer_from_json(model_path: str):
+        """Load tokenizer from tokenizer.json file directly."""
+        try:
+            from tokenizers import Tokenizer as HFTokenizer
+            from transformers import PreTrainedTokenizerFast
+            import json
+            
+            tokenizer_json_path = os.path.join(model_path, "tokenizer.json")
+            if not os.path.exists(tokenizer_json_path):
+                raise FileNotFoundError(f"tokenizer.json not found in {model_path}")
+            
+            tokenizer_obj = HFTokenizer.from_file(tokenizer_json_path)
+            tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer_obj)
+            
+            # Try to load additional config
+            tokenizer_config_path = os.path.join(model_path, "tokenizer_config.json")
+            if os.path.exists(tokenizer_config_path):
+                with open(tokenizer_config_path, 'r') as f:
+                    tokenizer_config = json.load(f)
+                    if 'eos_token' in tokenizer_config:
+                        tokenizer.eos_token = tokenizer_config['eos_token']
+                    if 'bos_token' in tokenizer_config:
+                        tokenizer.bos_token = tokenizer_config['bos_token']
+                    if 'pad_token' in tokenizer_config:
+                        tokenizer.pad_token = tokenizer_config['pad_token']
+                    elif 'eos_token' in tokenizer_config:
+                        tokenizer.pad_token = tokenizer_config['eos_token']
+            
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            
+            return tokenizer
+        except ImportError:
+            raise ImportError("tokenizers library required. Install with: pip install tokenizers")
+        except Exception as e:
+            raise Exception(f"Failed to load tokenizer from json: {e}")
+    
     def __init__(
         self,
         model_name: str = "/home/mpcblock/models/Llama-3.2-3B",
@@ -121,39 +159,70 @@ class GTX4050RealModelExperimentBase:
         print(f"Device: {device}")
         print(f"Quantization: {use_quantization} ({quantization_bits}-bit)")
         
-        # Load tokenizer
-        try:
-            # For local paths, use local_files_only=False to allow downloading tokenizer config if needed
-            tokenizer_kwargs = {
-                "trust_remote_code": True,
-            }
-            if not self.is_local_path:
-                tokenizer_kwargs["cache_dir"] = cache_dir
-            
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                local_files_only=self.is_local_path,
-                **tokenizer_kwargs
-            )
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-        except Exception as e:
-            print(f"Error loading tokenizer: {e}")
+        # Load tokenizer with multiple fallback methods
+        self.tokenizer = None
+        tokenizer_methods = [
+            # Method 1: Standard AutoTokenizer
+            {
+                "func": lambda: AutoTokenizer.from_pretrained(
+                    model_name,
+                    local_files_only=False,
+                    trust_remote_code=True,
+                ),
+                "name": "AutoTokenizer (standard)"
+            },
+            # Method 2: Without fast tokenizer
+            {
+                "func": lambda: AutoTokenizer.from_pretrained(
+                    model_name,
+                    local_files_only=False,
+                    trust_remote_code=True,
+                    use_fast=False,
+                ),
+                "name": "AutoTokenizer (use_fast=False)"
+            },
+            # Method 3: Try LlamaTokenizer specifically
+            {
+                "func": lambda: __import__('transformers', fromlist=['LlamaTokenizer']).LlamaTokenizer.from_pretrained(
+                    model_name,
+                    local_files_only=False,
+                    trust_remote_code=True,
+                ),
+                "name": "LlamaTokenizer"
+            },
+            # Method 4: Try loading from tokenizer.json directly (for local paths)
+            {
+                "func": lambda: self._load_tokenizer_from_json(model_name) if self.is_local_path else None,
+                "name": "Tokenizer from tokenizer.json",
+                "skip_if_none": True
+            },
+        ]
+        
+        for method in tokenizer_methods:
+            try:
+                result = method["func"]()
+                if result is None and method.get("skip_if_none", False):
+                    continue
+                self.tokenizer = result
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                print(f"✅ Tokenizer loaded using {method['name']}")
+                break
+            except Exception as e:
+                print(f"⚠️  {method['name']} failed: {e}")
+                continue
+        
+        if self.tokenizer is None:
+            print("❌ All tokenizer loading methods failed")
+            print("\nTroubleshooting:")
             if self.is_local_path:
-                print("Trying with local_files_only=False...")
-                try:
-                    self.tokenizer = AutoTokenizer.from_pretrained(
-                        model_name,
-                        local_files_only=False,
-                        trust_remote_code=True,
-                    )
-                    if self.tokenizer.pad_token is None:
-                        self.tokenizer.pad_token = self.tokenizer.eos_token
-                except Exception as e2:
-                    print(f"Error loading tokenizer (second attempt): {e2}")
-                    raise
+                print(f"1. Check if tokenizer files exist in: {model_name}")
+                print("2. Ensure tokenizer.json or tokenizer_config.json exists")
+                print("3. Try re-downloading the model from HuggingFace")
             else:
-                raise
+                print("1. Check HuggingFace authentication: huggingface-cli login")
+                print("2. Check network connection")
+            raise RuntimeError("Failed to load tokenizer with all methods")
         
         # Configure quantization for GTX 4050
         quantization_config = None

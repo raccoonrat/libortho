@@ -5,6 +5,7 @@
 
 import os
 import sys
+import json
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -53,6 +54,9 @@ def verify_model(model_path: str = "/home/mpcblock/models/Llama-3.2-3B"):
     
     # 尝试加载tokenizer
     print("\n[步骤1] 加载tokenizer...")
+    tokenizer = None
+    
+    # 方法1: 尝试从模型路径加载
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             model_path,
@@ -61,9 +65,70 @@ def verify_model(model_path: str = "/home/mpcblock/models/Llama-3.2-3B"):
         )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
-        print("✅ Tokenizer加载成功")
-    except Exception as e:
-        print(f"❌ Tokenizer加载失败: {e}")
+        print("✅ Tokenizer加载成功（方法1）")
+    except Exception as e1:
+        print(f"⚠️  方法1失败: {e1}")
+        
+        # 方法2: 尝试读取config.json确定tokenizer类型
+        try:
+            import json
+            config_path = os.path.join(model_path, "config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                
+                # 尝试使用config中的tokenizer_class
+                if 'tokenizer_class' in config:
+                    tokenizer_class = config['tokenizer_class']
+                    print(f"   尝试使用tokenizer_class: {tokenizer_class}")
+                    from transformers import AutoTokenizer
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_path,
+                        local_files_only=False,
+                        trust_remote_code=True,
+                        use_fast=False,  # 尝试不使用fast tokenizer
+                    )
+                else:
+                    # 方法3: 尝试使用LlamaTokenizer
+                    print("   尝试使用LlamaTokenizer...")
+                    from transformers import LlamaTokenizer
+                    tokenizer = LlamaTokenizer.from_pretrained(
+                        model_path,
+                        local_files_only=False,
+                        trust_remote_code=True,
+                    )
+                
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                print("✅ Tokenizer加载成功（方法2/3）")
+        except Exception as e2:
+            print(f"⚠️  方法2/3也失败: {e2}")
+            
+            # 方法4: 尝试从tokenizer.json直接加载
+            try:
+                tokenizer_json_path = os.path.join(model_path, "tokenizer.json")
+                if os.path.exists(tokenizer_json_path):
+                    print("   尝试从tokenizer.json加载...")
+                    from tokenizers import Tokenizer
+                    from transformers import PreTrainedTokenizerFast
+                    tokenizer_obj = Tokenizer.from_file(tokenizer_json_path)
+                    tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer_obj)
+                    if tokenizer.pad_token is None:
+                        tokenizer.pad_token = tokenizer.eos_token
+                    print("✅ Tokenizer加载成功（方法4）")
+                else:
+                    raise Exception("tokenizer.json not found")
+            except Exception as e3:
+                print(f"❌ 所有方法都失败")
+                print(f"   最后错误: {e3}")
+                print("\n建议:")
+                print("1. 检查模型目录是否包含tokenizer.json或tokenizer_config.json")
+                print("2. 尝试从HuggingFace重新下载模型")
+                print("3. 检查模型是否完整下载")
+                return False
+    
+    if tokenizer is None:
+        print("❌ 无法加载tokenizer")
         return False
     
     # 尝试加载模型（FP16，无量化）
