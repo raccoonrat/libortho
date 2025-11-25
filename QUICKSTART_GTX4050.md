@@ -124,35 +124,59 @@ GTX 4050支持：
 2. 检查驱动是否支持Ada Lovelace
 3. 运行`nvidia-smi`查看详细信息
 
-## 运行真实模型实验
+## 运行真实模型实验（Llama 3.2 3B 本地模型）
 
 ### 快速开始
 
 ```bash
-# 运行所有实验（使用4-bit量化和小模型）
+# 运行所有实验（使用本地Llama 3.2 3B模型）
 ./experiments/run_gtx4050_experiments.sh
+```
+
+### 验证本地模型
+
+```bash
+# 验证模型是否可以正确加载
+python experiments/verify_local_model.py
+
+# 或指定自定义路径
+python experiments/verify_local_model.py /path/to/your/model
 ```
 
 ### 手动运行
 
 ```bash
-# 安装bitsandbytes（必需）
-pip install bitsandbytes
-
-# 运行实验
+# 使用本地Llama 3.2 3B模型（推荐，可能不需要量化）
 python experiments/real_model_experiments_gtx4050.py \
-    --model meta-llama/Llama-2-1B-hf \
+    --model /home/mpcblock/models/Llama-3.2-3B \
     --experiment all \
+    --no-quantization
+
+# 如果需要量化（显存紧张时）
+python experiments/real_model_experiments_gtx4050.py \
+    --model /home/mpcblock/models/Llama-3.2-3B \
     --quantization-bits 4
 ```
 
 ### 支持的模型
 
-对于6GB显存，推荐使用：
+#### 本地模型（推荐）⭐
 
-- **Llama-2-1B** (`meta-llama/Llama-2-1B-hf`) - 推荐 ✅
-- **TinyLlama** (`TinyLlama/TinyLlama-1.1B-Chat-v1.0`) - 推荐 ✅
-- **Phi-2** (`microsoft/phi-2`) - 推荐 ✅（4-bit）
+- **Llama 3.2 3B** (`/home/mpcblock/models/Llama-3.2-3B`) - 强烈推荐 ✅
+  - FP16: ~6GB（可能不需要量化）
+  - 4-bit: ~2GB（如果显存紧张）
+  - **优势**: 更小更快，本地加载，无需HuggingFace认证
+
+#### HuggingFace模型（需要量化）
+
+- **Llama 3 8B Instruct** (`meta-llama/Meta-Llama-3-8B-Instruct`)
+  - 必须使用4-bit量化
+- **Llama 3.1 8B Instruct** (`meta-llama/Meta-Llama-3.1-8B-Instruct`)
+  - 必须使用4-bit量化
+
+**注意**: 
+- **Llama 3.2 3B可能不需要量化**（推荐先尝试`--no-quantization`）
+- Llama 3 8B模型必须使用4-bit量化才能在6GB显存上运行
 
 ### 实验优化
 

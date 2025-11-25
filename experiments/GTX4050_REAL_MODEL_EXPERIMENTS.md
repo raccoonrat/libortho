@@ -1,18 +1,19 @@
-# GTX 4050 真实模型实验指南
+# GTX 4050 真实模型实验指南（Llama 3）
 
 **GPU**: NVIDIA GeForce GTX 4050  
 **显存**: 6GB GDDR6  
 **架构**: Ada Lovelace (sm_89)  
-**优化**: 4-bit量化，小模型，小批次
+**模型**: Llama 3  
+**优化**: 4-bit量化，小批次
 
 ---
 
 ## 概述
 
-本文档说明如何在GTX 4050（6GB显存）上运行真实模型实验。由于显存限制，我们使用以下优化：
+本文档说明如何在GTX 4050（6GB显存）上运行Llama 3模型实验。由于显存限制，我们使用以下优化：
 
-1. **4-bit量化**: 使用bitsandbytes进行4-bit量化，减少显存占用
-2. **小模型**: 使用Llama-2-1B或TinyLlama替代7B模型
+1. **4-bit量化**: 使用bitsandbytes进行4-bit量化，减少显存占用（必需）
+2. **Llama 3 8B**: 使用Llama 3 8B模型（4-bit量化后约4GB显存）
 3. **小批次**: 批次大小设为1，避免OOM
 4. **内存管理**: 自动清理GPU缓存
 
@@ -57,25 +58,31 @@ GPU 0: NVIDIA GeForce GTX 4050
 ### 快速开始
 
 ```bash
-# 运行所有实验（使用默认小模型和4-bit量化）
+# 运行所有实验（使用本地Llama 3.2 3B模型，默认路径）
 python experiments/real_model_experiments_gtx4050.py
+
+# 或使用快速启动脚本
+./experiments/run_gtx4050_experiments.sh
+
+# 指定本地模型路径
+python experiments/real_model_experiments_gtx4050.py \
+    --model /home/mpcblock/models/Llama-3.2-3B
 ```
 
 ### 自定义选项
 
 ```bash
-# 使用特定模型
+# 使用Llama 3.1 8B
 python experiments/real_model_experiments_gtx4050.py \
-    --model TinyLlama/TinyLlama-1.1B-Chat-v1.0
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct
 
-# 使用8-bit量化（需要更多显存）
+# 使用Llama 3 8B Base（非Instruct版本）
+python experiments/real_model_experiments_gtx4050.py \
+    --model meta-llama/Meta-Llama-3-8B
+
+# 使用8-bit量化（需要更多显存，可能OOM）
 python experiments/real_model_experiments_gtx4050.py \
     --quantization-bits 8
-
-# 禁用量化（仅适用于非常小的模型）
-python experiments/real_model_experiments_gtx4050.py \
-    --no-quantization \
-    --model meta-llama/Llama-2-1B-hf
 
 # 运行单个实验
 python experiments/real_model_experiments_gtx4050.py \
@@ -86,25 +93,32 @@ python experiments/real_model_experiments_gtx4050.py \
 
 ### 推荐模型（适合6GB VRAM）
 
-1. **Llama-2-1B** (`meta-llama/Llama-2-1B-hf`)
-   - FP16: ~2GB
-   - 4-bit: ~1GB
-   - 推荐：✅
+1. **Llama 3.2 3B** (`/home/mpcblock/models/Llama-3.2-3B`) ⭐⭐⭐ 强烈推荐（默认）
+   - FP16: ~6GB（适合6GB显存，可能不需要量化）
+   - 4-bit: ~2GB（如果显存紧张）
+   - 推荐：✅（本地模型，无需HuggingFace认证）
+   - **优势**: 更小更快，可能不需要量化
 
-2. **TinyLlama** (`TinyLlama/TinyLlama-1.1B-Chat-v1.0`)
-   - FP16: ~2.2GB
-   - 4-bit: ~1.1GB
-   - 推荐：✅
+2. **Llama 3 8B Instruct** (`meta-llama/Meta-Llama-3-8B-Instruct`)
+   - FP16: ~16GB（不适合6GB显存）
+   - 4-bit: ~4GB
+   - 推荐：✅（必须使用4-bit量化）
 
-3. **Phi-2** (`microsoft/phi-2`)
-   - FP16: ~5GB
-   - 4-bit: ~2.5GB
-   - 推荐：✅（4-bit）
+3. **Llama 3 8B Base** (`meta-llama/Meta-Llama-3-8B`)
+   - FP16: ~16GB（不适合6GB显存）
+   - 4-bit: ~4GB
+   - 推荐：✅（必须使用4-bit量化）
+
+4. **Llama 3.1 8B Instruct** (`meta-llama/Meta-Llama-3.1-8B-Instruct`)
+   - FP16: ~16GB（不适合6GB显存）
+   - 4-bit: ~4GB
+   - 推荐：✅（必须使用4-bit量化）
 
 ### 不推荐（显存不足）
 
-- **Llama-2-7B**: 需要~14GB（FP16）或~4GB（4-bit，可能仍不够）
-- **Llama-3-8B**: 需要~16GB（FP16）
+- **Llama 3 70B**: 需要~140GB（FP16）或~35GB（4-bit）
+- **Llama 3 405B**: 需要~810GB（FP16）
+- **任何模型不使用量化**: Llama 3 8B需要至少16GB显存
 
 ## 实验说明
 
@@ -155,16 +169,27 @@ torch.cuda.empty_cache()
 
 ### GTX 4050性能
 
-- **推理速度**: ~10-20 tokens/sec（4-bit量化，1B模型）
+#### Llama 3.2 3B (推荐)
+
+- **推理速度**: ~20-30 tokens/sec（FP16，无量化）
+- **批次大小**: 1-2（可能支持）
+- **最大序列长度**: 512-1024 tokens
+- **显存使用**: ~5-6GB（FP16，无量化）
+
+#### Llama 3 8B (4-bit量化)
+
+- **推理速度**: ~8-15 tokens/sec（4-bit量化）
 - **批次大小**: 1（避免OOM）
-- **最大序列长度**: 512 tokens（推荐256）
+- **最大序列长度**: 512 tokens（推荐256-512）
+- **显存使用**: ~4-5GB（4-bit量化）
 
 ### 与更大GPU的对比
 
-| GPU | 模型 | 批次大小 | 速度 |
-|-----|------|---------|------|
-| GTX 4050 (6GB) | Llama-2-1B (4-bit) | 1 | ~15 tokens/sec |
-| RTX 4090 (24GB) | Llama-2-7B (FP16) | 8 | ~50 tokens/sec |
+| GPU | 模型 | 量化 | 批次大小 | 速度 |
+|-----|------|------|---------|------|
+| GTX 4050 (6GB) | Llama 3 8B | 4-bit | 1 | ~10 tokens/sec |
+| RTX 4090 (24GB) | Llama 3 8B | FP16 | 8 | ~40 tokens/sec |
+| A100 (40GB) | Llama 3 8B | FP16 | 16 | ~60 tokens/sec |
 
 ## 故障排除
 
@@ -173,13 +198,14 @@ torch.cuda.empty_cache()
 **错误**: `RuntimeError: CUDA out of memory`
 
 **解决**:
-1. 确保使用4-bit量化：`--quantization-bits 4`
-2. 使用更小的模型：`--model meta-llama/Llama-2-1B-hf`
+1. **必须使用4-bit量化**：`--quantization-bits 4`（Llama 3 8B必需）
+2. 确保模型名称正确：`--model meta-llama/Meta-Llama-3-8B-Instruct`
 3. 减少批次大小（代码中已自动处理）
 4. 清理GPU缓存：
    ```python
    torch.cuda.empty_cache()
    ```
+5. 如果仍然OOM，检查是否有其他程序占用GPU内存
 
 ### bitsandbytes错误
 
@@ -237,19 +263,20 @@ pip install bitsandbytes
 
 ## 性能优化建议
 
-### 1. 使用4-bit量化
+### 1. 必须使用4-bit量化（Llama 3 8B）
 
-4-bit量化可以：
-- 减少75%的显存占用
+4-bit量化对于Llama 3 8B是**必需的**：
+- 减少75%的显存占用（16GB → 4GB）
 - 保持~95%的模型精度
 - 适合GTX 4050的6GB显存
+- **不使用量化会导致OOM**
 
-### 2. 选择小模型
+### 2. Llama 3模型选择
 
 对于6GB显存：
-- ✅ 1B-2B模型（4-bit）
-- ⚠️ 3B-5B模型（4-bit，可能OOM）
-- ❌ 7B+模型（即使4-bit也可能OOM）
+- ✅ **Llama 3 8B（4-bit）**: 推荐，约4GB显存
+- ❌ **Llama 3 8B（FP16）**: 需要16GB，不适合
+- ❌ **Llama 3 70B**: 即使4-bit也需要35GB，不适合
 
 ### 3. 批次大小
 

@@ -2,11 +2,11 @@
 libortho - Real Model Experiments for GTX 4050 (6GB VRAM)
 
 This module implements experiments optimized for GTX 4050 with 6GB VRAM.
-Uses quantization (4-bit/8-bit) and smaller models to fit within memory constraints.
+Uses quantization (4-bit/8-bit) and Llama 3 models to fit within memory constraints.
 
 Key optimizations:
 - 4-bit quantization using bitsandbytes
-- Smaller models (Llama-2-1B, or quantized 7B)
+- Llama 3 models (8B with 4-bit quantization, or smaller variants)
 - Reduced batch sizes
 - Gradient checkpointing
 - CPU offloading for large models
@@ -46,13 +46,15 @@ class GTX4050RealModelExperimentBase:
     
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-2-7b-hf",
+        model_name: str = "/home/mpcblock/models/Llama-3.2-3B",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         cache_dir: Optional[str] = None,
-        use_quantization: bool = True,
+        use_quantization: bool = False,  # Llama 3.2 3B may not need quantization
         quantization_bits: int = 4,
         use_small_model: bool = True,
     ):
+        # Check if model_name is a local path
+        self.is_local_path = os.path.isdir(model_name) or os.path.exists(model_name)
         self.model_name = model_name
         self.device = device
         self.cache_dir = cache_dir
@@ -64,42 +66,94 @@ class GTX4050RealModelExperimentBase:
         if device == "cuda" and torch.cuda.is_available():
             gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             print(f"GPU Memory: {gpu_memory:.2f} GB")
-            if gpu_memory < 8:
-                print("⚠️  Low GPU memory detected. Using aggressive optimizations.")
+            
+            # For Llama 3.2 3B (~6GB in FP16), may not need quantization on 6GB GPU
+            # But if GPU memory is very limited, enable quantization
+            if gpu_memory < 6:
+                print("⚠️  Very low GPU memory detected. Enabling quantization.")
                 use_quantization = True
                 if quantization_bits > 4:
                     quantization_bits = 4
+                self.use_quantization = True
+                self.quantization_bits = 4
+            elif gpu_memory < 8 and not self.is_local_path:
+                # For remote models, be more conservative
+                print("⚠️  Low GPU memory detected. Consider using quantization for large models.")
         
-        # Select appropriate model for 6GB VRAM
-        if use_small_model:
-            # Try smaller models first
-            small_models = [
-                "meta-llama/Llama-2-1B-hf",  # ~2GB in FP16
-                "TinyLlama/TinyLlama-1.1B-Chat-v1.0",  # ~2.2GB
-                "microsoft/phi-2",  # ~5GB in FP16, ~2.5GB in 4-bit
+        # Select appropriate model for 6GB VRAM (only for remote models)
+        if use_small_model and not self.is_local_path:
+            # Llama 3 models optimized for 6GB VRAM
+            llama3_models = [
+                "meta-llama/Meta-Llama-3-8B-Instruct",  # ~4GB in 4-bit, ~16GB in FP16
+                "meta-llama/Meta-Llama-3-8B",  # Base model
+                "meta-llama/Meta-Llama-3.1-8B-Instruct",  # Llama 3.1 version
             ]
-            if model_name == "meta-llama/Llama-2-7b-hf":
-                print("⚠️  Llama-2-7B is too large for 6GB VRAM.")
-                print(f"   Switching to smaller model: {small_models[0]}")
-                model_name = small_models[0]
+            
+            # Check if model is too large for 6GB VRAM without quantization
+            large_models = [
+                "meta-llama/Meta-Llama-3-8B",
+                "meta-llama/Meta-Llama-3-8B-Instruct",
+                "meta-llama/Meta-Llama-3.1-8B",
+                "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                "meta-llama/Llama-2-7b-hf",
+                "meta-llama/Llama-2-7b-chat-hf",
+            ]
+            
+            if model_name in large_models and not use_quantization:
+                print(f"⚠️  {model_name} is too large for 6GB VRAM without quantization.")
+                print("   Enabling 4-bit quantization automatically.")
+                use_quantization = True
+                quantization_bits = 4
+                self.use_quantization = True
+                self.quantization_bits = 4
+            
+            # If still too large even with quantization, suggest smaller alternatives
+            if model_name in ["meta-llama/Meta-Llama-3-70B", "meta-llama/Meta-Llama-3.1-70B"]:
+                print(f"⚠️  {model_name} is too large even with 4-bit quantization for 6GB VRAM.")
+                print(f"   Switching to Llama 3 8B: {llama3_models[0]}")
+                model_name = llama3_models[0]
                 self.model_name = model_name
         
-        print(f"Loading model: {model_name}")
+        if self.is_local_path:
+            print(f"Loading model from local path: {model_name}")
+        else:
+            print(f"Loading model from HuggingFace: {model_name}")
         print(f"Device: {device}")
         print(f"Quantization: {use_quantization} ({quantization_bits}-bit)")
         
         # Load tokenizer
         try:
+            # For local paths, use local_files_only=False to allow downloading tokenizer config if needed
+            tokenizer_kwargs = {
+                "trust_remote_code": True,
+            }
+            if not self.is_local_path:
+                tokenizer_kwargs["cache_dir"] = cache_dir
+            
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
-                cache_dir=cache_dir,
-                trust_remote_code=True,
+                local_files_only=self.is_local_path,
+                **tokenizer_kwargs
             )
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
         except Exception as e:
             print(f"Error loading tokenizer: {e}")
-            raise
+            if self.is_local_path:
+                print("Trying with local_files_only=False...")
+                try:
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        local_files_only=False,
+                        trust_remote_code=True,
+                    )
+                    if self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                except Exception as e2:
+                    print(f"Error loading tokenizer (second attempt): {e2}")
+                    raise
+            else:
+                raise
         
         # Configure quantization for GTX 4050
         quantization_config = None
@@ -119,24 +173,44 @@ class GTX4050RealModelExperimentBase:
         # Load model with quantization
         try:
             load_kwargs = {
-                "cache_dir": cache_dir,
                 "trust_remote_code": True,
             }
+            
+            # For local paths, don't use cache_dir
+            if not self.is_local_path:
+                load_kwargs["cache_dir"] = cache_dir
+            
+            # For local paths, try local_files_only first
+            if self.is_local_path:
+                load_kwargs["local_files_only"] = True
             
             if quantization_config is not None:
                 load_kwargs["quantization_config"] = quantization_config
                 load_kwargs["device_map"] = "auto"
                 load_kwargs["torch_dtype"] = torch.float16
             else:
-                # For small models, can load in FP16
+                # For small models like Llama 3.2 3B, can load in FP16
                 load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
                 if device == "cuda":
                     load_kwargs["device_map"] = "auto"
             
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                **load_kwargs
-            )
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    **load_kwargs
+                )
+            except Exception as local_error:
+                # If local_files_only failed, try without it
+                if self.is_local_path and "local_files_only" in load_kwargs:
+                    print(f"⚠️  Loading with local_files_only failed: {local_error}")
+                    print("Retrying with local_files_only=False (may download missing config files)...")
+                    load_kwargs.pop("local_files_only", None)
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        **load_kwargs
+                    )
+                else:
+                    raise
             
             if device == "cpu" and not quantization_config:
                 self.model = self.model.to(device)
@@ -144,9 +218,15 @@ class GTX4050RealModelExperimentBase:
         except Exception as e:
             print(f"Error loading model: {e}")
             print("\nTroubleshooting:")
-            print("1. Install bitsandbytes: pip install bitsandbytes")
-            print("2. Check HuggingFace authentication: huggingface-cli login")
-            print("3. Try smaller model or CPU mode")
+            if self.is_local_path:
+                print(f"1. Check if model path is correct: {model_name}")
+                print("2. Ensure model directory contains config.json and model files")
+                print("3. Try with --no-quantization if model is small enough")
+                print("4. Check file permissions: ls -la " + model_name)
+            else:
+                print("1. Install bitsandbytes: pip install bitsandbytes")
+                print("2. Check HuggingFace authentication: huggingface-cli login")
+                print("3. Try smaller model or CPU mode")
             raise
         
         self.model.eval()
@@ -392,12 +472,14 @@ class GTX4050_Experiment2_NullTest(GTX4050RealModelExperimentBase):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run real model experiments for GTX 4050")
+    parser = argparse.ArgumentParser(description="Run real model experiments for GTX 4050 with Llama 3.2")
     parser.add_argument(
         "--model",
         type=str,
-        default="meta-llama/Llama-2-1B-hf",
-        help="Model name (default: meta-llama/Llama-2-1B-hf for 6GB VRAM)",
+        default="/home/mpcblock/models/Llama-3.2-3B",
+        help="Model name or local path (default: /home/mpcblock/models/Llama-3.2-3B). "
+             "Can be local path or HuggingFace model ID. "
+             "Llama 3.2 3B may not require quantization for 6GB VRAM.",
     )
     parser.add_argument(
         "--experiment",

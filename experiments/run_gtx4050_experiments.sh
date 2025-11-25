@@ -39,10 +39,10 @@ echo "============================================================"
 echo ""
 
 python3 experiments/real_model_experiments_gtx4050.py \
-    --model meta-llama/Llama-2-1B-hf \
+    --model /home/mpcblock/models/Llama-3.2-3B \
     --experiment all \
     --device cuda \
-    --quantization-bits 4
+    --no-quantization
 
 echo ""
 echo "============================================================"
