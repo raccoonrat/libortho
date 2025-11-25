@@ -20,7 +20,12 @@ CUDA_TEST_BIN = test_cuda_kernel
 TENSOR_CORE_TEST_BIN = test_tensor_core
 
 NVCC = nvcc
-CUDA_CFLAGS = -O3 -arch=sm_75 -arch=sm_80 -arch=sm_86 --expt-relaxed-constexpr
+CUDA_CFLAGS = -O3 -arch=sm_75 -arch=sm_80 -arch=sm_86 -arch=sm_89 -arch=sm_100 --expt-relaxed-constexpr
+# sm_75: Turing (RTX 20xx)
+# sm_80: Ampere (A100)
+# sm_86: Ampere consumer (RTX 30xx)
+# sm_89: Ada Lovelace (GTX 4050, RTX 40xx)
+# sm_100: Blackwell (RTX 5060, RTX 50 series)
 
 .PHONY: all clean test benchmark cuda-test tensor-core-test check-gpu
 

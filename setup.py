@@ -48,6 +48,7 @@ if HAS_CUDA:
                     '-arch=sm_80',  # Ampere
                     '-arch=sm_86',  # Ampere (consumer)
                     '-arch=sm_89',  # Ada Lovelace
+                    '-arch=sm_100', # Blackwell (RTX 5060, RTX 50 series)
                     '--expt-relaxed-constexpr'  # For WMMA API
                 ]
             },
