@@ -1,0 +1,38 @@
+Add comprehensive experiment data collection and visualization
+
+This commit adds a complete data collection and visualization system for all
+three core experiments, enabling paper-ready figures and detailed numerical
+results.
+
+What changed:
+- Added run_experiments_with_visualization.py: Enhanced experiment runner
+  that collects detailed metrics and generates publication-quality figures
+- Added generate_paper_figures.py: Quick script to generate all paper figures
+- Added comprehensive documentation:
+  * EXPERIMENT_VISUALIZATION_README.md: Usage guide
+  * EXPERIMENT_RESULTS_TEMPLATE.md: Paper results template
+  * EXPERIMENT_DATA_COMPLETE.md: Completion report
+- Updated requirements.txt: Added matplotlib and seaborn for visualization
+
+Features:
+- Automatic data collection for all three experiments
+- High-quality visualization (PNG, 300 DPI) with 4 subplots per experiment
+- JSON export for complete numerical data
+- CSV export for summary tables (LaTeX-ready)
+- Success/failure validation for each experiment
+- Paper integration guide with LaTeX code examples
+
+Experiments covered:
+1. Privacy Kill Switch: Privacy vs general error ratios, alpha sweep
+2. Saving the Genius: Quantization levels, relative preservation
+3. Dual Differential Privacy: Epsilon sweep, utility ratios
+
+All figures are publication-ready and can be directly included in papers.
+Results are saved to experiments/results/ with timestamps.
+
+Fixes:
+- Fixed NameError in save_results() (results -> self.results)
+- Replaced Unicode checkmarks with ASCII (PASS/FAIL) to avoid font warnings
+
+Tested: Script runs successfully and generates all expected outputs.
+

@@ -1,0 +1,11 @@
+Experiment,Metric,Value,Success
+Exp1,Privacy Ratio,2.60804722282764,PASS
+Exp1,General Ratio,0.7406303277961775,
+Exp1,Sparsity,0.949951171875,
+Exp2,Relative Preservation,0.16271327880392733,PASS
+Exp2,Common Degradation,48.95945829601634,
+Exp2,Genius Survival,7.966353989436092,
+Exp2,Sparsity,0.969970703125,
+Exp3,Public Utility Ratio,8.782326736567214,PASS
+Exp3,Best Epsilon,2.0,
+Exp3,Sparsity,0.969970703125,

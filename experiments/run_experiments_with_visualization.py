@@ -480,9 +480,9 @@ class ExperimentCollector:
             ['Ortho Sparsity', f"{results['sparsity']:.2%}"],
             ['Privacy Error Ratio', f"{results['privacy_ratio']:.2f}x"],
             ['General Error Ratio', f"{results['general_ratio']:.2f}x"],
-            ['Privacy Success', '✅' if results['privacy_ratio'] > 1.5 else '❌'],
-            ['General Success', '✅' if results['general_ratio'] < 2.0 else '❌'],
-            ['Overall Success', '✅' if results['success'] else '❌']
+            ['Privacy Success', 'PASS' if results['privacy_ratio'] > 1.5 else 'FAIL'],
+            ['General Success', 'PASS' if results['general_ratio'] < 2.0 else 'FAIL'],
+            ['Overall Success', 'PASS' if results['success'] else 'FAIL']
         ]
         table = ax.table(cellText=table_data, cellLoc='left', loc='center',
                         colWidths=[0.6, 0.4])
@@ -495,7 +495,7 @@ class ExperimentCollector:
                     table[(i, j)].set_facecolor('#40466e')
                     table[(i, j)].set_text_props(weight='bold', color='white')
             elif 'Success' in table_data[i][0]:
-                color = '#90EE90' if '✅' in table_data[i][1] else '#FFB6C1'
+                color = '#90EE90' if 'PASS' in table_data[i][1] else '#FFB6C1'
                 table[(i, 1)].set_facecolor(color)
         
         plt.tight_layout()
@@ -569,7 +569,7 @@ class ExperimentCollector:
             ['Common Degradation (INT3)', f"{results['common_degradation_int3']:.2f}x"],
             ['Genius Survival (INT3)', f"{results['genius_survival_int3']:.2f}x"],
             ['Relative Preservation', f"{results['relative_preservation']:.2f}x"],
-            ['Success', '✅' if results['success'] else '❌']
+            ['Success', 'PASS' if results['success'] else 'FAIL']
         ]
         table = ax.table(cellText=table_data, cellLoc='left', loc='center',
                         colWidths=[0.6, 0.4])
@@ -582,7 +582,7 @@ class ExperimentCollector:
                     table[(i, j)].set_facecolor('#40466e')
                     table[(i, j)].set_text_props(weight='bold', color='white')
             elif 'Success' in table_data[i][0]:
-                color = '#90EE90' if '✅' in table_data[i][1] else '#FFB6C1'
+                color = '#90EE90' if 'PASS' in table_data[i][1] else '#FFB6C1'
                 table[(i, 1)].set_facecolor(color)
         
         plt.tight_layout()
@@ -652,7 +652,7 @@ class ExperimentCollector:
             ['Public Utility Ratio', f"{best_result['public_utility_ratio']:.2f}x"],
             ['Global DP Degradation', f"{best_result['public_global_degradation']:.2f}x"],
             ['Dual DP Degradation', f"{best_result['public_dual_degradation']:.2f}x"],
-            ['Overall Success', '✅' if results['overall_success'] else '❌']
+            ['Overall Success', 'PASS' if results['overall_success'] else 'FAIL']
         ]
         table = ax.table(cellText=table_data, cellLoc='left', loc='center',
                         colWidths=[0.6, 0.4])
@@ -665,7 +665,7 @@ class ExperimentCollector:
                     table[(i, j)].set_facecolor('#40466e')
                     table[(i, j)].set_text_props(weight='bold', color='white')
             elif 'Success' in table_data[i][0]:
-                color = '#90EE90' if '✅' in table_data[i][1] else '#FFB6C1'
+                color = '#90EE90' if 'PASS' in table_data[i][1] else '#FFB6C1'
                 table[(i, 1)].set_facecolor(color)
         
         plt.tight_layout()
@@ -706,26 +706,26 @@ class ExperimentCollector:
             writer.writerow(['Experiment', 'Metric', 'Value', 'Success'])
             
             # Exp1
-            writer.writerow(['Exp1', 'Privacy Ratio', results['exp1']['privacy_ratio'], 
-                           '✅' if results['exp1']['success'] else '❌'])
-            writer.writerow(['Exp1', 'General Ratio', results['exp1']['general_ratio'], ''])
-            writer.writerow(['Exp1', 'Sparsity', results['exp1']['sparsity'], ''])
+            writer.writerow(['Exp1', 'Privacy Ratio', self.results['exp1']['privacy_ratio'], 
+                           'PASS' if self.results['exp1']['success'] else 'FAIL'])
+            writer.writerow(['Exp1', 'General Ratio', self.results['exp1']['general_ratio'], ''])
+            writer.writerow(['Exp1', 'Sparsity', self.results['exp1']['sparsity'], ''])
             
             # Exp2
-            writer.writerow(['Exp2', 'Relative Preservation', results['exp2']['relative_preservation'],
-                           '✅' if results['exp2']['success'] else '❌'])
-            writer.writerow(['Exp2', 'Common Degradation', results['exp2']['common_degradation_int3'], ''])
-            writer.writerow(['Exp2', 'Genius Survival', results['exp2']['genius_survival_int3'], ''])
-            writer.writerow(['Exp2', 'Sparsity', results['exp2']['sparsity'], ''])
+            writer.writerow(['Exp2', 'Relative Preservation', self.results['exp2']['relative_preservation'],
+                           'PASS' if self.results['exp2']['success'] else 'FAIL'])
+            writer.writerow(['Exp2', 'Common Degradation', self.results['exp2']['common_degradation_int3'], ''])
+            writer.writerow(['Exp2', 'Genius Survival', self.results['exp2']['genius_survival_int3'], ''])
+            writer.writerow(['Exp2', 'Sparsity', self.results['exp2']['sparsity'], ''])
             
             # Exp3
-            best_epsilon = max(results['exp3']['epsilon_values'], 
-                             key=lambda e: results['exp3']['results_by_epsilon'][e]['public_utility_ratio'])
-            best_result = results['exp3']['results_by_epsilon'][best_epsilon]
+            best_epsilon = max(self.results['exp3']['epsilon_values'], 
+                             key=lambda e: self.results['exp3']['results_by_epsilon'][e]['public_utility_ratio'])
+            best_result = self.results['exp3']['results_by_epsilon'][best_epsilon]
             writer.writerow(['Exp3', 'Public Utility Ratio', best_result['public_utility_ratio'],
-                           '✅' if results['exp3']['overall_success'] else '❌'])
+                           'PASS' if self.results['exp3']['overall_success'] else 'FAIL'])
             writer.writerow(['Exp3', 'Best Epsilon', best_epsilon, ''])
-            writer.writerow(['Exp3', 'Sparsity', results['exp3']['sparsity'], ''])
+            writer.writerow(['Exp3', 'Sparsity', self.results['exp3']['sparsity'], ''])
         
         print(f"Saved CSV summary: {csv_filename}")
 
