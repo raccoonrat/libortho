@@ -124,10 +124,50 @@ GTX 4050支持：
 2. 检查驱动是否支持Ada Lovelace
 3. 运行`nvidia-smi`查看详细信息
 
+## 运行真实模型实验
+
+### 快速开始
+
+```bash
+# 运行所有实验（使用4-bit量化和小模型）
+./experiments/run_gtx4050_experiments.sh
+```
+
+### 手动运行
+
+```bash
+# 安装bitsandbytes（必需）
+pip install bitsandbytes
+
+# 运行实验
+python experiments/real_model_experiments_gtx4050.py \
+    --model meta-llama/Llama-2-1B-hf \
+    --experiment all \
+    --quantization-bits 4
+```
+
+### 支持的模型
+
+对于6GB显存，推荐使用：
+
+- **Llama-2-1B** (`meta-llama/Llama-2-1B-hf`) - 推荐 ✅
+- **TinyLlama** (`TinyLlama/TinyLlama-1.1B-Chat-v1.0`) - 推荐 ✅
+- **Phi-2** (`microsoft/phi-2`) - 推荐 ✅（4-bit）
+
+### 实验优化
+
+GTX 4050版本自动优化：
+
+- ✅ 4-bit量化（减少75%显存）
+- ✅ 小批次处理（batch_size=1）
+- ✅ 自动内存管理
+- ✅ OOM错误自动处理
+
 ## 详细文档
 
 更多信息请参考：
 - `docs/GTX4050_ADA_LOVELACE_SUPPORT.md` - 完整支持文档
+- `experiments/GTX4050_REAL_MODEL_EXPERIMENTS.md` - 真实模型实验指南
 - `tests/GPU_TEST_GUIDE.md` - GPU测试指南
 
 ## 注意事项
@@ -135,4 +175,6 @@ GTX 4050支持：
 1. **架构兼容性**: GTX 4050使用sm_89，已在主配置中支持
 2. **驱动要求**: 需要支持Ada Lovelace的NVIDIA驱动
 3. **CUDA版本**: 推荐CUDA 11.8或更高版本
+4. **显存限制**: 6GB显存，需要使用量化和小模型
+5. **bitsandbytes**: 真实模型实验需要安装bitsandbytes
 
