@@ -19,6 +19,36 @@ def check_cuda():
     except:
         return False
 
+def get_cuda_archs():
+    """Get CUDA architectures based on CUDA version."""
+    base_archs = [
+        '-arch=sm_75',  # Turing (Tensor Core INT8)
+        '-arch=sm_80',  # Ampere
+        '-arch=sm_86',  # Ampere (consumer)
+        '-arch=sm_89',  # Ada Lovelace
+    ]
+    
+    # Check if CUDA version supports sm_100 (Blackwell)
+    # sm_100 requires CUDA 12.8+
+    try:
+        result = subprocess.run(['nvcc', '--version'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            import re
+            version_match = re.search(r'release (\d+)\.(\d+)', result.stdout)
+            if version_match:
+                major = int(version_match.group(1))
+                minor = int(version_match.group(2))
+                if major > 12 or (major == 12 and minor >= 8):
+                    base_archs.append('-arch=sm_100')  # Blackwell (RTX 5060)
+                    print(f"CUDA {major}.{minor} detected: Including sm_100 (Blackwell) support")
+                else:
+                    print(f"CUDA {major}.{minor} detected: sm_100 not supported (requires CUDA 12.8+)")
+    except:
+        pass  # If version detection fails, just use base architectures
+    
+    return base_archs
+
 HAS_CUDA = check_cuda()
 
 ext_modules = []
@@ -44,11 +74,7 @@ if HAS_CUDA:
                 'nvcc': [
                     '-O3', 
                     '--use_fast_math',
-                    '-arch=sm_75',  # Turing (Tensor Core INT8)
-                    '-arch=sm_80',  # Ampere
-                    '-arch=sm_86',  # Ampere (consumer)
-                    '-arch=sm_89',  # Ada Lovelace
-                    '-arch=sm_100', # Blackwell (RTX 5060, RTX 50 series)
+                ] + get_cuda_archs() + [
                     '--expt-relaxed-constexpr'  # For WMMA API
                 ]
             },

@@ -20,12 +20,33 @@ CUDA_TEST_BIN = test_cuda_kernel
 TENSOR_CORE_TEST_BIN = test_tensor_core
 
 NVCC = nvcc
-CUDA_CFLAGS = -O3 -arch=sm_75 -arch=sm_80 -arch=sm_86 -arch=sm_89 -arch=sm_100 --expt-relaxed-constexpr
-# sm_75: Turing (RTX 20xx)
-# sm_80: Ampere (A100)
-# sm_86: Ampere consumer (RTX 30xx)
-# sm_89: Ada Lovelace (GTX 4050, RTX 40xx)
-# sm_100: Blackwell (RTX 5060, RTX 50 series)
+
+# Detect CUDA version and set architectures accordingly
+# sm_100 (Blackwell) requires CUDA 12.8+
+# Try to detect CUDA version, fallback to base architectures if detection fails
+CUDA_VERSION_STR := $(shell nvcc --version 2>/dev/null | grep -o 'release [0-9]\+\.[0-9]\+' | head -1 | sed 's/release //' || echo "0.0")
+CUDA_MAJOR := $(shell echo $(CUDA_VERSION_STR) | cut -d. -f1)
+CUDA_MINOR := $(shell echo $(CUDA_VERSION_STR) | cut -d. -f2)
+
+# Base architectures (supported by CUDA 11.0+)
+CUDA_ARCHS := -arch=sm_75 -arch=sm_80 -arch=sm_86 -arch=sm_89
+
+# Add sm_100 only if CUDA >= 12.8
+# Use numeric comparison: if major > 12 OR (major == 12 AND minor >= 8)
+CUDA_SUPPORTS_SM100 := $(shell [ $(CUDA_MAJOR) -gt 12 ] 2>/dev/null || ([ $(CUDA_MAJOR) -eq 12 ] 2>/dev/null && [ $(CUDA_MINOR) -ge 8 ] 2>/dev/null) && echo "yes" || echo "no")
+ifeq ($(CUDA_SUPPORTS_SM100),yes)
+    CUDA_ARCHS += -arch=sm_100
+    $(info CUDA $(CUDA_VERSION_STR) detected: Including sm_100 (Blackwell) support)
+else
+    $(info CUDA $(CUDA_VERSION_STR) detected: sm_100 not supported (requires CUDA 12.8+))
+endif
+
+CUDA_CFLAGS = -O3 $(CUDA_ARCHS) --expt-relaxed-constexpr
+# sm_75: Turing (RTX 20xx) - CUDA 10.0+
+# sm_80: Ampere (A100) - CUDA 11.0+
+# sm_86: Ampere consumer (RTX 30xx) - CUDA 11.0+
+# sm_89: Ada Lovelace (GTX 4050, RTX 40xx) - CUDA 11.8+
+# sm_100: Blackwell (RTX 5060, RTX 50 series) - CUDA 12.8+
 
 .PHONY: all clean test benchmark cuda-test tensor-core-test check-gpu
 
