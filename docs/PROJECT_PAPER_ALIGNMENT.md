@@ -145,7 +145,8 @@ def hessian_sieve(weight, H_inv, curvature_thresh):
     Residual = weight - W_base
 
     # 3. 几何影响（不仅是幅度，还有曲率加权）
-    geometric_impact = (Residual ** 2) / torch.diag(H_inv)
+    # 注意：使用 H_inv 的对角线，公式为 Impact = Residual^2 / diag(H_inv)
+    geometric_impact = (Residual ** 2) / (diag_H + 1e-6)  # 避免除零
 
     # 4. 按影响过滤
     mask = geometric_impact > curvature_thresh
@@ -153,6 +154,10 @@ def hessian_sieve(weight, H_inv, curvature_thresh):
 
     return W_base, W_ortho
 ```
+
+**实现说明**：
+- 在实际实验代码中，为了保持精度，会将低影响的残差部分（`W_low = Residual * (~mask)`）加回Base，形成 `W_base_runtime = W_base + W_low`
+- 这是实现优化，不影响理论正确性。理论上，低影响部分可以丢弃，但保留它们可以提高Base的精度
 
 **关键洞察**：
 我们不仅看残差幅度，还看**曲率加权影响**：
