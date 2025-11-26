@@ -2,7 +2,7 @@
 libortho - Setup Configuration
 """
 
-from setuptools import setup, Extension
+from setuptools import setup
 from pybind11 import get_cmake_dir
 import pybind11
 
@@ -53,40 +53,75 @@ HAS_CUDA = check_cuda()
 ext_modules = []
 
 if HAS_CUDA:
-    # CUDA extension with Tensor Core support
-    # FIXED: Use Extension instead of Pybind11Extension for better CUDA control
-    # Pybind11Extension has issues with dictionary extra_compile_args in some versions
-    from pybind11.setup_helpers import build_ext
-    
-    cuda_archs = get_cuda_archs()
-    nvcc_flags = [
-        '-O3', 
-        '--use_fast_math',
-    ] + cuda_archs + [
-        '--expt-relaxed-constexpr'  # For WMMA API
-    ]
-    
-    ext_modules.append(
-        Extension(
-            "libortho._C_ops",
-            [
-                "src/dual_gemm.cu",
-                "src/dual_gemm_tensor_core.cu",  # Tensor Core implementation
-                "torch_bind/bindings.cpp",
-            ],
-            include_dirs=[
-                "include",
-                pybind11.get_include(),
-            ],
-            language='c++',
-            extra_compile_args={
-                'cxx': ['-O3', '-std=c++17'],
-                'nvcc': nvcc_flags
-            },
-            libraries=['cudart', 'cublas'],
-            define_macros=[('VERSION_INFO', '"dev"')],
+    # FIXED: Use PyTorch's CUDAExtension which properly handles .cu files
+    # This is the recommended way to build CUDA extensions with PyTorch
+    try:
+        from torch.utils.cpp_extension import CUDAExtension, BuildExtension
+        
+        cuda_archs = get_cuda_archs()
+        nvcc_flags = [
+            '-O3', 
+            '--use_fast_math',
+        ] + cuda_archs + [
+            '--expt-relaxed-constexpr'  # For WMMA API
+        ]
+        
+        ext_modules.append(
+            CUDAExtension(
+                "libortho._C_ops",
+                [
+                    "src/dual_gemm.cu",
+                    "src/dual_gemm_tensor_core.cu",  # Tensor Core implementation
+                    "torch_bind/bindings.cpp",
+                ],
+                include_dirs=[
+                    "include",
+                    pybind11.get_include(),
+                ],
+                extra_compile_args={
+                    'cxx': ['-O3', '-std=c++17'],
+                    'nvcc': nvcc_flags
+                },
+                libraries=['cublas'],
+            )
         )
-    )
+        build_ext_class = BuildExtension
+    except ImportError:
+        # Fallback to pybind11 if PyTorch is not available
+        print("Warning: PyTorch not found, falling back to pybind11")
+        from setuptools import Extension
+        from pybind11.setup_helpers import build_ext as pybind11_build_ext
+        
+        cuda_archs = get_cuda_archs()
+        nvcc_flags = [
+            '-O3', 
+            '--use_fast_math',
+        ] + cuda_archs + [
+            '--expt-relaxed-constexpr'
+        ]
+        
+        # Note: Standard Extension doesn't handle .cu files well
+        # This is a fallback that may not work
+        ext_modules.append(
+            Extension(
+                "libortho._C_ops",
+                [
+                    "torch_bind/bindings.cpp",  # Only C++ files
+                ],
+                include_dirs=[
+                    "include",
+                    pybind11.get_include(),
+                ],
+                language='c++',
+                extra_compile_args={
+                    'cxx': ['-O3', '-std=c++17'],
+                },
+                define_macros=[('VERSION_INFO', '"dev"')],
+            )
+        )
+        build_ext_class = pybind11_build_ext
+else:
+    build_ext_class = None
 
 setup(
     name="libortho",
@@ -105,7 +140,7 @@ setup(
         "libortho": ["include/*.h"],
     },
     ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext} if HAS_CUDA and ext_modules else {},
+    cmdclass={"build_ext": build_ext_class} if build_ext_class else {},
     install_requires=[
         "torch>=1.12.0",
         "numpy>=1.20.0",
