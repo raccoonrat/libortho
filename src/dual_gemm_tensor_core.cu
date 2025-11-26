@@ -81,12 +81,13 @@ __global__ void tensor_core_int4_gemm_kernel(
     if (tile_m >= M || tile_n >= N) return;
     
     // Declare fragments for Tensor Core
+    // FIXED: For INT8 input, accumulator must be int32_t, not float
     fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, int8_t, row_major> a_frag;
     fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, int8_t, col_major> b_frag;
-    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
+    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, int32_t> c_frag;  // FIXED: int32_t for INT8 input
     
     // Initialize accumulator
-    fill_fragment(c_frag, 0.0f);
+    fill_fragment(c_frag, 0);
     
     // Shared memory for tiles (aligned for WMMA)
     // WMMA requires 128-byte alignment
@@ -155,6 +156,7 @@ __global__ void tensor_core_int4_gemm_kernel(
     
     // Store results with scale application
     // WMMA accumulator fragment access
+    // FIXED: Convert int32_t accumulator to float with scale
     for (int i = 0; i < c_frag.num_elements; i++) {
         // WMMA accumulator is accessed in row-major order
         int row_in_tile = i / WMMA_N;
@@ -164,7 +166,9 @@ __global__ void tensor_core_int4_gemm_kernel(
         
         if (global_row < M && global_col < N) {
             float scale = q_scales[global_col];
-            output[global_row * N + global_col] = c_frag.x[i] * scale;
+            // Convert int32_t accumulator to float, then apply scale
+            // INT8 * INT8 produces int32_t, scale converts to final float
+            output[global_row * N + global_col] = (float)c_frag.x[i] * scale;
         }
     }
 }
@@ -233,12 +237,13 @@ __global__ void dual_gemm_tensor_core_kernel(
     const float* input_batch = input + batch_idx * in_features;
     
     // Declare fragments for Tensor Core
+    // FIXED: For INT8 input, accumulator must be int32_t, not float
     fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, int8_t, row_major> a_frag;
     fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, int8_t, col_major> b_frag;
-    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_frag;
+    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, int32_t> c_frag;  // FIXED: int32_t for INT8 input
     
     // Initialize accumulator
-    fill_fragment(c_frag, 0.0f);
+    fill_fragment(c_frag, 0);
     
     // Shared memory for tiles (aligned for WMMA)
     __shared__ __align__(128) int8_t shared_a[WMMA_M * WMMA_K];
@@ -312,7 +317,8 @@ __global__ void dual_gemm_tensor_core_kernel(
         if (global_row < out_features && global_col < out_features) {
             // Base contribution (from Tensor Core)
             float scale = q_scales[global_col];
-            float base_val = c_frag.x[i] * scale;
+            // FIXED: Convert int32_t accumulator to float, then apply scale
+            float base_val = (float)c_frag.x[i] * scale;
             
             // Add Ortho contribution (sparse)
             float ortho_val = compute_ortho_contribution(
