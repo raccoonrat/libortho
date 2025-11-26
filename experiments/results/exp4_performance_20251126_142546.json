@@ -1,0 +1,10 @@
+{
+  "latency_fp16_ms": 1531.5462112426758,
+  "latency_base_ms": 1507.1144580841064,
+  "latency_per_token_fp16_ms": 30.630924224853516,
+  "latency_per_token_base_ms": 30.14228916168213,
+  "throughput_fp16_tokens_per_sec": 32.64674590486609,
+  "throughput_base_tokens_per_sec": 33.17598058448835,
+  "speedup": 1.0162109473686742,
+  "ortho_sparsity": 0.05915536892970363
+}

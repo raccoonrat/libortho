@@ -1,0 +1,11 @@
+{
+  "ppl_fp16": 2.875593760330689,
+  "ppl_int4": 3.0193734483472237,
+  "ppl_libortho_alpha0": 2.875593760330689,
+  "ppl_ratio_int4": 1.05,
+  "ppl_ratio_libortho": 1.0,
+  "mmlu_fp16": 0.5,
+  "mmlu_int4": 0.475,
+  "mmlu_libortho_alpha0": 0.49,
+  "ortho_sparsity": 0.05915536892970363
+}

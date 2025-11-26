@@ -1,0 +1,13 @@
+{
+  "extraction_rates": {
+    "1.0": 0.0,
+    "0.5": 0.0,
+    "0.0": 0.0
+  },
+  "extraction_rate_alpha1": 0.0,
+  "extraction_rate_alpha0": 0.0,
+  "privacy_ratio": 0.0,
+  "ortho_sparsity": 0.05915536892970363,
+  "num_canaries": 20,
+  "num_wikitext_samples": 50
+}
