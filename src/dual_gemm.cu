@@ -171,7 +171,7 @@ __device__ float compute_sparse_patch_coo(
  * No complex branching, just addition.
  */
 __global__ void dual_gemm_kernel_csr(
-    const int8_t* q_weight,
+    const uint8_t* q_weight,  // FIXED: Changed from int8_t* to uint8_t* for packed INT4
     const float* q_scales,
     const float* ortho_values,
     const int32_t* ortho_col_indices,
@@ -196,7 +196,7 @@ __global__ void dual_gemm_kernel_csr(
     // This is standard. Tensor Cores go Brrr.
     // Note: q_weight is packed INT4, so we need to pass the packed pointer
     float acc = compute_dense_tile(
-        (const uint8_t*)q_weight,
+        q_weight,  // FIXED: No cast needed, already uint8_t*
         q_scales,
         input_row,
         in_features,
@@ -225,7 +225,7 @@ __global__ void dual_gemm_kernel_csr(
  * Legacy COO format kernel (deprecated, kept for backward compatibility)
  */
 __global__ void dual_gemm_kernel_coo(
-    const int8_t* q_weight,
+    const uint8_t* q_weight,  // FIXED: Changed from int8_t* to uint8_t* for packed INT4
     const float* q_scales,
     const float* ortho_values,
     const uint16_t* ortho_indices,
@@ -248,7 +248,7 @@ __global__ void dual_gemm_kernel_coo(
     
     // 1. Compute Base (Dense INT4)
     float acc = compute_dense_tile(
-        (const uint8_t*)q_weight,
+        q_weight,  // FIXED: No cast needed, already uint8_t*
         q_scales,
         input_row,
         in_features,
@@ -318,7 +318,7 @@ extern "C" int orth_layer_forward_cuda(
     if (layer->ortho.format == 1 && layer->ortho.row_ptr && layer->ortho.col_indices) {
         // CSR format: O(1) row access, no warp divergence
         dual_gemm_kernel_csr<<<grid_size, block_size>>>(
-            (const uint8_t*)layer->base.q_weight,  // Changed to uint8_t for packed INT4
+            (const uint8_t*)layer->base.q_weight,  // Packed INT4 weights
             (const float*)layer->base.q_scales,
             layer->ortho.values,
             layer->ortho.col_indices,
@@ -333,7 +333,7 @@ extern "C" int orth_layer_forward_cuda(
     } else {
         // Legacy COO format (deprecated)
         dual_gemm_kernel_coo<<<grid_size, block_size>>>(
-            (const uint8_t*)layer->base.q_weight,
+            (const uint8_t*)layer->base.q_weight,  // Packed INT4 weights
             (const float*)layer->base.q_scales,
             layer->ortho.values,
             layer->ortho.indices,
