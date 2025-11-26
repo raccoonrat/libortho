@@ -21,6 +21,9 @@ extern "C" int orth_layer_forward_cuda(
     size_t batch_size
 );
 
+// Forward declarations for kernels (ensure correct types)
+// Note: CUDA kernels don't need forward declarations, but this helps with type checking
+
 /*
  * Unpack INT4 value from packed array
  */
@@ -317,9 +320,13 @@ extern "C" int orth_layer_forward_cuda(
     // Use CSR format if available (format == 1), otherwise fallback to COO
     if (layer->ortho.format == 1 && layer->ortho.row_ptr && layer->ortho.col_indices) {
         // CSR format: O(1) row access, no warp divergence
+        // FIXED: Cast void* to uint8_t* for packed INT4 weights
+        const uint8_t* q_weight_ptr = static_cast<const uint8_t*>(layer->base.q_weight);
+        const float* q_scales_ptr = static_cast<const float*>(layer->base.q_scales);
+        
         dual_gemm_kernel_csr<<<grid_size, block_size>>>(
-            (const uint8_t*)layer->base.q_weight,  // Packed INT4 weights
-            (const float*)layer->base.q_scales,
+            q_weight_ptr,
+            q_scales_ptr,
             layer->ortho.values,
             layer->ortho.col_indices,
             layer->ortho.row_ptr,
@@ -332,9 +339,13 @@ extern "C" int orth_layer_forward_cuda(
         );
     } else {
         // Legacy COO format (deprecated)
+        // FIXED: Cast void* to uint8_t* for packed INT4 weights
+        const uint8_t* q_weight_ptr = static_cast<const uint8_t*>(layer->base.q_weight);
+        const float* q_scales_ptr = static_cast<const float*>(layer->base.q_scales);
+        
         dual_gemm_kernel_coo<<<grid_size, block_size>>>(
-            (const uint8_t*)layer->base.q_weight,  // Packed INT4 weights
-            (const float*)layer->base.q_scales,
+            q_weight_ptr,
+            q_scales_ptr,
             layer->ortho.values,
             layer->ortho.indices,
             layer->ortho.count,
