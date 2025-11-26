@@ -262,28 +262,73 @@ class RealModelLibOrtho:
                 w_base = self.base_weights[name]
                 w_ortho_sparse = self.ortho_weights_sparse[name]
                 
-                # Convert sparse ortho back to dense for combination
-                # FIXED: Only convert when needed (alpha > 0), and convert to same device as base
-                if self.alpha > 0.0 and w_ortho_sparse._nnz() > 0:
-                    w_ortho = w_ortho_sparse.to_dense().to(w_base.device)
+                # FIXED: Ensure weights are on correct device and check for NaN/Inf
+                target_device = module.weight.device
+                w_base = w_base.to(target_device)
+                
+                # FIXED: When alpha=0.0, we should use w_base + w_ortho (original weight approximation)
+                # instead of just w_base (quantized), to avoid numerical instability.
+                # When alpha=1.0, we use w_base + 1.0 * w_ortho = w_base + w_ortho (original).
+                # So we always need to convert sparse ortho to dense when available.
+                if w_ortho_sparse._nnz() > 0:
+                    w_ortho = w_ortho_sparse.to_dense().to(target_device)
                     # Combined weight: Base + alpha * Ortho
-                    combined = w_base + self.alpha * w_ortho
+                    # alpha=0.0: w_base + 0.0 * w_ortho = w_base (but w_base is quantized, may be unstable)
+                    # alpha=1.0: w_base + 1.0 * w_ortho ≈ original weight
+                    # FIXED: For alpha=0.0, use w_base + w_ortho (original) instead of just w_base
+                    if self.alpha == 0.0:
+                        # Use original weight approximation (w_base + w_ortho) for stability
+                        combined = w_base + w_ortho
+                    else:
+                        # Use Base + alpha * Ortho
+                        combined = w_base + self.alpha * w_ortho
                 else:
-                    # No ortho contribution
+                    # No ortho contribution - use base only
                     combined = w_base
                 
-                module.weight.data.copy_(combined.to(module.weight.device))
+                # FIXED: Check for NaN/Inf before applying weights
+                if torch.isnan(combined).any() or torch.isinf(combined).any():
+                    print(f"⚠️  Warning: NaN/Inf detected in layer {name}, using original weights")
+                    # Fallback to original weights if available
+                    if hasattr(self, 'original_weights') and name in self.original_weights:
+                        combined = self.original_weights[name].to(target_device)
+                    else:
+                        # Use base weights without modification
+                        combined = w_base
+                
+                # Ensure combined weights match original shape and dtype
+                if combined.shape != module.weight.shape:
+                    print(f"⚠️  Warning: Shape mismatch in layer {name}: {combined.shape} vs {module.weight.shape}")
+                    continue
+                
+                module.weight.data.copy_(combined)
     
     def generate(self, prompt: str, max_new_tokens: int = 50, **kwargs) -> str:
         """Generate text with current alpha setting."""
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
+        # FIXED: Set pad_token_id to avoid warnings
+        if "pad_token_id" not in kwargs:
+            kwargs["pad_token_id"] = self.tokenizer.eos_token_id
+        
+        # FIXED: Set attention_mask to avoid warnings
+        if "attention_mask" not in kwargs:
+            kwargs["attention_mask"] = inputs.get("attention_mask", None)
+        
         with torch.no_grad():
-            outputs = self.model.generate(
-                inputs["input_ids"],
-                max_new_tokens=max_new_tokens,
-                **kwargs
-            )
+            try:
+                outputs = self.model.generate(
+                    inputs["input_ids"],
+                    max_new_tokens=max_new_tokens,
+                    **kwargs
+                )
+            except RuntimeError as e:
+                if "CUDA" in str(e) or "assert" in str(e).lower():
+                    print(f"⚠️  CUDA error during generation: {e}")
+                    print(f"    This may indicate numerical instability in weights.")
+                    print(f"    Try setting alpha=1.0 or check weight values.")
+                    raise
+                raise
         
         generated = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         return generated

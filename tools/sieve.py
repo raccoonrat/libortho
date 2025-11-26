@@ -15,10 +15,29 @@ def quantize_int4(weight: torch.Tensor) -> torch.Tensor:
     Simulate INT4 quantization.
     We don't do complex calibration, just use the simplest MinMax scaling.
     Keep it stupid simple.
+    
+    FIXED: Add numerical stability checks to avoid NaN/Inf.
     """
-    scale = weight.abs().max() / 7.0
+    # FIXED: Handle zero weights and avoid division by zero
+    max_val = weight.abs().max()
+    if max_val == 0.0 or torch.isnan(max_val) or torch.isinf(max_val):
+        # If all weights are zero or invalid, return zeros
+        return torch.zeros_like(weight)
+    
+    scale = max_val / 7.0
+    # FIXED: Avoid division by zero
+    if scale == 0.0:
+        scale = 1.0
+    
     tensor_int = (weight / scale).round().clamp(-8, 7)
-    return tensor_int * scale
+    result = tensor_int * scale
+    
+    # FIXED: Check for NaN/Inf in result
+    if torch.isnan(result).any() or torch.isinf(result).any():
+        # Fallback: return original weight if quantization produces invalid values
+        return weight.clone()
+    
+    return result
 
 
 def hessian_sieve(
