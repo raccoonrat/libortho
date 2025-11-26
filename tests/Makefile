@@ -41,7 +41,18 @@ else
     $(info CUDA $(CUDA_VERSION_STR) detected: sm_100 not supported (requires CUDA 12.8+))
 endif
 
-CUDA_CFLAGS = -O3 $(CUDA_ARCHS) --expt-relaxed-constexpr
+# FIXED: Use -gencode instead of -arch for better compatibility
+# This ensures kernel images are generated for each architecture
+CUDA_CFLAGS = -O3 --expt-relaxed-constexpr
+# Generate code for each architecture explicitly
+CUDA_CFLAGS += -gencode arch=compute_75,code=sm_75
+CUDA_CFLAGS += -gencode arch=compute_80,code=sm_80
+CUDA_CFLAGS += -gencode arch=compute_86,code=sm_86
+CUDA_CFLAGS += -gencode arch=compute_89,code=sm_89
+# Add sm_100 only if CUDA >= 12.8
+ifeq ($(CUDA_SUPPORTS_SM100),yes)
+    CUDA_CFLAGS += -gencode arch=compute_100,code=sm_100
+endif
 # sm_75: Turing (RTX 20xx) - CUDA 10.0+
 # sm_80: Ampere (A100) - CUDA 11.0+
 # sm_86: Ampere consumer (RTX 30xx) - CUDA 11.0+

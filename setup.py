@@ -3,7 +3,6 @@ libortho - Setup Configuration
 """
 
 from setuptools import setup, Extension
-from pybind11.setup_helpers import Pybind11Extension, build_ext
 from pybind11 import get_cmake_dir
 import pybind11
 
@@ -55,8 +54,20 @@ ext_modules = []
 
 if HAS_CUDA:
     # CUDA extension with Tensor Core support
+    # FIXED: Use Extension instead of Pybind11Extension for better CUDA control
+    # Pybind11Extension has issues with dictionary extra_compile_args in some versions
+    from pybind11.setup_helpers import build_ext
+    
+    cuda_archs = get_cuda_archs()
+    nvcc_flags = [
+        '-O3', 
+        '--use_fast_math',
+    ] + cuda_archs + [
+        '--expt-relaxed-constexpr'  # For WMMA API
+    ]
+    
     ext_modules.append(
-        Pybind11Extension(
+        Extension(
             "libortho._C_ops",
             [
                 "src/dual_gemm.cu",
@@ -68,17 +79,12 @@ if HAS_CUDA:
                 pybind11.get_include(),
             ],
             language='c++',
-            cxx_std=17,
             extra_compile_args={
                 'cxx': ['-O3', '-std=c++17'],
-                'nvcc': [
-                    '-O3', 
-                    '--use_fast_math',
-                ] + get_cuda_archs() + [
-                    '--expt-relaxed-constexpr'  # For WMMA API
-                ]
+                'nvcc': nvcc_flags
             },
             libraries=['cudart', 'cublas'],
+            define_macros=[('VERSION_INFO', '"dev"')],
         )
     )
 
@@ -99,7 +105,7 @@ setup(
         "libortho": ["include/*.h"],
     },
     ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext},
+    cmdclass={"build_ext": build_ext} if HAS_CUDA and ext_modules else {},
     install_requires=[
         "torch>=1.12.0",
         "numpy>=1.20.0",
