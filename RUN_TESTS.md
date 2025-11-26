@@ -11,7 +11,7 @@
 
 ```bash
 # 1. 进入项目目录
-cd /home/mpcblock/lab/github.com/raccoonrat/libortho
+cd libortho
 
 # 2. 运行完整测试套件
 cd tests
