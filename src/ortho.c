@@ -75,10 +75,14 @@ int orth_layer_init(orth_layer_t *layer,
     memset(layer->base.q_scales, 0, aligned_scale_size);
     
     // Initialize ortho (empty)
-    layer->ortho.indices = NULL;
+    // FIXED: Initialize CSR format fields
+    layer->ortho.row_ptr = NULL;
+    layer->ortho.col_indices = NULL;
     layer->ortho.values = NULL;
+    layer->ortho.indices = NULL;  // Legacy COO
     layer->ortho.count = 0;
     layer->ortho.capacity = 0;
+    layer->ortho.format = 1;  // Default to CSR format
     
     layer->alpha = 1.0f;
     
@@ -111,6 +115,8 @@ void orth_layer_set_alpha(orth_layer_t *layer, float alpha) {
 }
 
 int orth_layer_alloc_ortho(orth_layer_t *layer, size_t count) {
+    // Legacy COO format allocation (deprecated)
+    // For new code, use orth_layer_alloc_ortho_csr instead
     if (!layer || count == 0) {
         return -1;
     }
@@ -118,7 +124,7 @@ int orth_layer_alloc_ortho(orth_layer_t *layer, size_t count) {
     // Free existing ortho if any
     orth_layer_free_ortho(layer);
     
-    // Allocate indices with 128-byte alignment
+    // Allocate indices with 128-byte alignment (COO format)
     size_t indices_size = count * sizeof(uint16_t);
     size_t aligned_indices_size = (indices_size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
     
@@ -162,6 +168,96 @@ int orth_layer_alloc_ortho(orth_layer_t *layer, size_t count) {
     
     layer->ortho.count = count;
     layer->ortho.capacity = count;
+    layer->ortho.format = 0;  // COO format
+    
+    return 0;
+}
+
+int orth_layer_alloc_ortho_csr(orth_layer_t *layer, size_t nnz, size_t out_features) {
+    // FIXED: Allocate CSR format buffers for O(1) row access
+    // This enables fast CUDA kernels without warp divergence
+    if (!layer || nnz == 0 || out_features == 0) {
+        return -1;
+    }
+    
+    // Free existing ortho if any
+    orth_layer_free_ortho(layer);
+    
+    // Allocate row pointers: [out_features + 1] int32_t
+    size_t row_ptr_size = (out_features + 1) * sizeof(int32_t);
+    size_t aligned_row_ptr_size = (row_ptr_size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+#ifdef _WIN32
+    layer->ortho.row_ptr = (int32_t*)_aligned_malloc(aligned_row_ptr_size, ALIGNMENT);
+#else
+    if (posix_memalign((void**)&layer->ortho.row_ptr, ALIGNMENT, aligned_row_ptr_size) != 0) {
+        return -1;
+    }
+#endif
+    if (!layer->ortho.row_ptr) {
+        return -1;
+    }
+    memset(layer->ortho.row_ptr, 0, aligned_row_ptr_size);
+    
+    // Allocate column indices: [nnz] int32_t
+    size_t col_indices_size = nnz * sizeof(int32_t);
+    size_t aligned_col_indices_size = (col_indices_size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+#ifdef _WIN32
+    layer->ortho.col_indices = (int32_t*)_aligned_malloc(aligned_col_indices_size, ALIGNMENT);
+#else
+    if (posix_memalign((void**)&layer->ortho.col_indices, ALIGNMENT, aligned_col_indices_size) != 0) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.row_ptr);
+#else
+        free(layer->ortho.row_ptr);
+#endif
+        return -1;
+    }
+#endif
+    if (!layer->ortho.col_indices) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.row_ptr);
+#else
+        free(layer->ortho.row_ptr);
+#endif
+        return -1;
+    }
+    memset(layer->ortho.col_indices, 0, aligned_col_indices_size);
+    
+    // Allocate values: [nnz] float
+    size_t values_size = nnz * sizeof(float);
+    size_t aligned_values_size = (values_size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+#ifdef _WIN32
+    layer->ortho.values = (float*)_aligned_malloc(aligned_values_size, ALIGNMENT);
+#else
+    if (posix_memalign((void**)&layer->ortho.values, ALIGNMENT, aligned_values_size) != 0) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.row_ptr);
+        _aligned_free(layer->ortho.col_indices);
+#else
+        free(layer->ortho.row_ptr);
+        free(layer->ortho.col_indices);
+#endif
+        return -1;
+    }
+#endif
+    if (!layer->ortho.values) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.row_ptr);
+        _aligned_free(layer->ortho.col_indices);
+#else
+        free(layer->ortho.row_ptr);
+        free(layer->ortho.col_indices);
+#endif
+        return -1;
+    }
+    memset(layer->ortho.values, 0, aligned_values_size);
+    
+    layer->ortho.count = nnz;
+    layer->ortho.capacity = nnz;
+    layer->ortho.format = 1;  // CSR format
     
     return 0;
 }
@@ -171,6 +267,26 @@ void orth_layer_free_ortho(orth_layer_t *layer) {
         return;
     }
     
+    // Free CSR format buffers
+    if (layer->ortho.row_ptr) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.row_ptr);
+#else
+        free(layer->ortho.row_ptr);
+#endif
+        layer->ortho.row_ptr = NULL;
+    }
+    
+    if (layer->ortho.col_indices) {
+#ifdef _WIN32
+        _aligned_free(layer->ortho.col_indices);
+#else
+        free(layer->ortho.col_indices);
+#endif
+        layer->ortho.col_indices = NULL;
+    }
+    
+    // Free legacy COO format buffers
     if (layer->ortho.indices) {
 #ifdef _WIN32
         _aligned_free(layer->ortho.indices);
@@ -191,6 +307,7 @@ void orth_layer_free_ortho(orth_layer_t *layer) {
     
     layer->ortho.count = 0;
     layer->ortho.capacity = 0;
+    layer->ortho.format = 0;
 }
 
 // Helper: Unpack INT4 value from packed array

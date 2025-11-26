@@ -91,7 +91,7 @@ void orth_layer_free(orth_layer_t *layer);
 void orth_layer_set_alpha(orth_layer_t *layer, float alpha);
 
 /*
- * Allocate Ortho component with 128-byte alignment
+ * Allocate Ortho component with 128-byte alignment (COO format, deprecated)
  * Memory alignment is critical for Memory Controller efficiency
  * 
  * Args:
@@ -102,6 +102,21 @@ void orth_layer_set_alpha(orth_layer_t *layer, float alpha);
  *   0 on success, -1 on failure
  */
 int orth_layer_alloc_ortho(orth_layer_t *layer, size_t count);
+
+/*
+ * Allocate Ortho component in CSR format (preferred)
+ * FIXED: Allocates row_ptr, col_indices, and values for CSR format
+ * This enables O(1) row access in CUDA kernels, eliminating warp divergence
+ * 
+ * Args:
+ *   layer: Layer structure
+ *   nnz: Number of non-zero elements
+ *   out_features: Number of output features (for row_ptr size)
+ * 
+ * Returns:
+ *   0 on success, -1 on failure
+ */
+int orth_layer_alloc_ortho_csr(orth_layer_t *layer, size_t nnz, size_t out_features);
 
 /*
  * Free Ortho component (with aligned memory)

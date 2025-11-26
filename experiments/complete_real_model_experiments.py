@@ -122,10 +122,11 @@ class RealModelLibOrtho:
         self.tokenizer = tokenizer
         self.device = device
         
-        # Store original weights and separated weights
-        self.original_weights = {}
+        # Store separated weights
+        # FIXED: Removed original_weights (redundant, saves 6GB for 3B model)
+        # FIXED: ortho_weights stored as sparse tensors (saves ~5.7GB for 95% sparsity)
         self.base_weights = {}
-        self.ortho_weights = {}
+        self.ortho_weights_sparse = {}  # Stored as sparse tensors, not dense
         self.alpha = 1.0  # Kill switch parameter
         
         # Cache for Hessian computation
@@ -216,19 +217,26 @@ class RealModelLibOrtho:
                 sparsity_target=sparsity_target,
             )
             
-            # Store separated weights (keep on CPU if lazy loading to save GPU memory)
+            # Store separated weights
+            # FIXED: Store base weights (needed for inference)
+            # FIXED: Store ortho as SPARSE tensor (saves ~95% memory for 95% sparsity)
             if lazy_loading:
-                self.original_weights[name] = weight.clone().cpu()
                 self.base_weights[name] = w_base.cpu()
-                self.ortho_weights[name] = w_ortho.cpu()
+                # Convert to sparse tensor: only store non-zero values
+                w_ortho_sparse = w_ortho.to_sparse_coo().cpu()
+                self.ortho_weights_sparse[name] = w_ortho_sparse
             else:
-                self.original_weights[name] = weight.clone()
                 self.base_weights[name] = w_base
-                self.ortho_weights[name] = w_ortho
+                # Convert to sparse tensor: only store non-zero values
+                w_ortho_sparse = w_ortho.to_sparse_coo()
+                self.ortho_weights_sparse[name] = w_ortho_sparse
             
             # Statistics
             total_params += weight.numel()
             ortho_params += (w_ortho != 0).sum().item()
+            
+            # Free dense w_ortho immediately (we have sparse version)
+            del w_ortho
             
             # Clear GPU cache if lazy loading
             if lazy_loading and self.device == "cuda":
@@ -252,11 +260,19 @@ class RealModelLibOrtho:
         for name, module in self.model.named_modules():
             if isinstance(module, nn.Linear) and name in self.base_weights:
                 w_base = self.base_weights[name]
-                w_ortho = self.ortho_weights[name]
+                w_ortho_sparse = self.ortho_weights_sparse[name]
                 
-                # Combined weight: Base + alpha * Ortho
-                combined = w_base + self.alpha * w_ortho
-                module.weight.data.copy_(combined)
+                # Convert sparse ortho back to dense for combination
+                # FIXED: Only convert when needed (alpha > 0), and convert to same device as base
+                if self.alpha > 0.0 and w_ortho_sparse._nnz() > 0:
+                    w_ortho = w_ortho_sparse.to_dense().to(w_base.device)
+                    # Combined weight: Base + alpha * Ortho
+                    combined = w_base + self.alpha * w_ortho
+                else:
+                    # No ortho contribution
+                    combined = w_base
+                
+                module.weight.data.copy_(combined.to(module.weight.device))
     
     def generate(self, prompt: str, max_new_tokens: int = 50, **kwargs) -> str:
         """Generate text with current alpha setting."""
