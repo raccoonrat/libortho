@@ -1,10 +1,10 @@
 #!/bin/bash
-# Script to create and setup GTX 4050 (Ada Lovelace) support branch
+# Script to create and setup A800 (Ampere) support branch
 
 set -e
 
 echo "============================================================"
-echo "Creating GTX 4050 (Ada Lovelace) Support Branch"
+echo "Creating A800 (Ampere) Support Branch"
 echo "============================================================"
 echo ""
 
@@ -31,7 +31,7 @@ if ! git diff-index --quiet HEAD --; then
 fi
 
 # Create new branch
-BRANCH_NAME="feature/gtx4050-ada-lovelace-support"
+BRANCH_NAME="feature/a800-ampere-support"
 echo "Creating branch: $BRANCH_NAME"
 git checkout -b $BRANCH_NAME
 
@@ -39,23 +39,26 @@ echo ""
 echo "✅ Branch created successfully!"
 echo ""
 echo "Branch: $BRANCH_NAME"
-echo "GPU: NVIDIA GeForce GTX 4050"
-echo "Architecture: Ada Lovelace"
-echo "CUDA Compute Capability: 8.9 (sm_89)"
+echo "GPU: NVIDIA A800"
+echo "Architecture: Ampere"
+echo "CUDA Compute Capability: 8.0 (sm_80)"
+echo "Memory: 80GB (typical)"
 echo ""
-echo "Note: GTX 4050 uses Ada Lovelace architecture (sm_89),"
+echo "Note: A800 uses Ampere architecture (sm_80),"
 echo "      which is already supported in the main configuration."
-echo "      This branch ensures explicit support and documentation."
+echo "      This branch ensures explicit support and optimization for A800."
 echo ""
 echo "Changes made:"
-echo "  - docs/GTX4050_ADA_LOVELACE_SUPPORT.md: Added documentation"
-echo "  - QUICKSTART_GTX4050.md: Added quick start guide"
+echo "  - docs/A800_AMPERE_SUPPORT.md: Added documentation"
+echo "  - QUICKSTART_A800.md: Added quick start guide"
+echo "  - Memory optimizations for large models (80GB support)"
 echo ""
 echo "Next steps:"
 echo "  1. Review the changes: git diff"
 echo "  2. Test compilation: cd tests && make clean && make cuda-test"
 echo "  3. Check GPU: cd tests && python3 check_gpu.py"
-echo "  4. Commit changes: git add . && git commit -m 'Add GTX 4050 (Ada Lovelace) support'"
+echo "  4. Test with large model: python3 experiments/complete_real_model_experiments.py"
+echo "  5. Commit changes: git add . && git commit -m 'Add A800 (Ampere) support'"
 echo ""
-echo "For detailed information, see: docs/GTX4050_ADA_LOVELACE_SUPPORT.md"
+echo "For detailed information, see: docs/A800_AMPERE_SUPPORT.md"
 
