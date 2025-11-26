@@ -127,7 +127,8 @@ setup(
     name="libortho",
     version="0.1.0",
     description="Dual-Manifold LLM Runtime Library",
-    author="libortho contributors",
+    # FIXED: Remove author to avoid pyproject.toml warning
+    # author="libortho contributors",  # Moved to avoid conflict with pyproject.toml
     python_requires=">=3.8",
     packages=["libortho", "libortho.torch_bind", "libortho.tools", "libortho.experiments"],
     package_dir={
@@ -141,11 +142,8 @@ setup(
     },
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext_class} if build_ext_class else {},
-    install_requires=[
-        "torch>=1.12.0",
-        "numpy>=1.20.0",
-        "pybind11>=2.10.0",
-    ],
+    # FIXED: install_requires is defined in pyproject.toml, avoid duplication
+    # install_requires is handled by pyproject.toml dependencies
     zip_safe=False,
 )
 
