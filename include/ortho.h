@@ -29,14 +29,27 @@ typedef struct {
 
 /* 
  * The Ortho: The Normal Component
- * We don't use standard CSR. We use a "Coordinate Stream" 
- * that is pre-sorted to minimize memory jumps.
+ * FIXED: Now uses CSR format for O(1) row access, eliminating warp divergence.
+ * 
+ * CSR Format:
+ *   - row_ptr: Points to start of each row in col_indices/values
+ *   - col_indices: Column indices of non-zero elements
+ *   - values: Non-zero values
+ * 
+ * For row i: non-zeros are at indices [row_ptr[i], row_ptr[i+1])
  */
 typedef struct {
-    uint16_t *indices;  // Flat index or (row, col) - test it
-    float *values;      // FP16/BF16 values (stored as float for compatibility)
-    int count;          // Number of non-zero elements
-    size_t capacity;    // Allocated capacity
+    // CSR format (preferred)
+    int32_t *row_ptr;      // Row pointers [out_features + 1]
+    int32_t *col_indices;   // Column indices [nnz]
+    float *values;         // FP16/BF16 values (stored as float for compatibility)
+    
+    // Legacy COO format (deprecated, kept for backward compatibility)
+    uint16_t *indices;      // Flat indices (COO format, deprecated)
+    
+    int count;              // Number of non-zero elements
+    size_t capacity;        // Allocated capacity
+    int format;             // 0 = COO (deprecated), 1 = CSR (preferred)
 } orth_ortho_t;
 
 /*

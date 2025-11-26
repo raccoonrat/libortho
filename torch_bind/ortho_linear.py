@@ -80,11 +80,35 @@ class OrthoLinear(nn.Module):
         self.base_weight.data = base_weight.to(self.base_weight.dtype)
         
         # Pack ortho into sparse format (using sieve.py function for consistency)
+        # FIXED: Now supports CSR format (preferred) and COO format (backward compatibility)
         from tools.sieve import pack_ortho_sparse
-        indices, values = pack_ortho_sparse(ortho_weight, format="coo")
         
-        self.ortho_indices = indices.to(self.ortho_indices.device) if indices.numel() > 0 else torch.tensor([], dtype=torch.uint16, device=self.ortho_indices.device)
+        # Use CSR format by default (O(1) row access, no warp divergence)
+        row_ptr, col_indices, values = pack_ortho_sparse(ortho_weight, format="csr")
+        
+        # Store CSR format data
+        # For backward compatibility with current forward() implementation, we also compute COO
+        # TODO: Update forward() to use CSR format directly for better performance
+        self.ortho_row_ptr = row_ptr.to(self.ortho_values.device) if row_ptr.numel() > 0 else torch.tensor([], dtype=torch.int32, device=self.ortho_values.device)
+        self.ortho_col_indices = col_indices.to(self.ortho_values.device) if col_indices.numel() > 0 else torch.tensor([], dtype=torch.int32, device=self.ortho_values.device)
         self.ortho_values = values.to(self.ortho_values.device) if values.numel() > 0 else torch.tensor([], dtype=torch.float16, device=self.ortho_values.device)
+        
+        # Legacy COO format (for backward compatibility with current forward implementation)
+        # Reconstruct from CSR: iterate through rows and build flat indices
+        if values.numel() > 0:
+            in_features = ortho_weight.shape[1]
+            out_features = ortho_weight.shape[0]
+            coo_indices = []
+            for row in range(out_features):
+                start = row_ptr[row].item()
+                end = row_ptr[row + 1].item()
+                for idx in range(start, end):
+                    col = col_indices[idx].item()
+                    flat_idx = row * in_features + col
+                    coo_indices.append(flat_idx)
+            self.ortho_indices = torch.tensor(coo_indices, dtype=torch.uint16, device=self.ortho_values.device)
+        else:
+            self.ortho_indices = torch.tensor([], dtype=torch.uint16, device=self.ortho_values.device)
         
         if base_scales is not None:
             self.base_scales.data = base_scales.to(self.base_scales.dtype)

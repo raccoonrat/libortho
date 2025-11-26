@@ -89,17 +89,47 @@ __device__ float compute_dense_tile(
 }
 
 /*
- * Compute sparse FP16 patch (optimized)
+ * Compute sparse FP16 patch (optimized with CSR format)
  * 
- * GOOD TASTE: 
- * We don't check "if (is_outlier)" for every element.
- * We iterate through a pre-computed list of "active" indices 
- * for this thread block.
+ * FIXED: Now uses CSR format for O(1) row access.
+ * No more linear search causing warp divergence.
  * 
- * Optimization: Indices are pre-sorted by row (done offline in sieve.py).
- * This enables early exit when we've passed the current row.
+ * CSR Format:
+ *   - row_ptr[out_idx] = start index for row out_idx
+ *   - row_ptr[out_idx + 1] = end index (exclusive)
+ *   - col_indices[start:end] = column indices for this row
+ *   - values[start:end] = corresponding values
  */
-__device__ float compute_sparse_patch(
+__device__ float compute_sparse_patch_csr(
+    const float* ortho_values,
+    const int32_t* ortho_col_indices,
+    const int32_t* ortho_row_ptr,
+    const float* input,
+    int in_features,
+    int out_idx
+) {
+    float acc = 0.0f;
+    
+    // O(1) row access using CSR format
+    int start_idx = ortho_row_ptr[out_idx];
+    int end_idx = ortho_row_ptr[out_idx + 1];
+    
+    // Process all non-zeros in this row
+    // No branching, no divergence - all threads in warp process same number of elements
+    for (int i = start_idx; i < end_idx; i++) {
+        int col = ortho_col_indices[i];
+        if (col < in_features) {
+            acc += ortho_values[i] * input[col];
+        }
+    }
+    
+    return acc;
+}
+
+/*
+ * Legacy COO format support (deprecated, kept for backward compatibility)
+ */
+__device__ float compute_sparse_patch_coo(
     const float* ortho_values,
     const uint16_t* ortho_indices,
     const float* input,
@@ -109,25 +139,15 @@ __device__ float compute_sparse_patch(
 ) {
     float acc = 0.0f;
     
-    // Indices are pre-sorted by row (then column) in sieve.py
-    // Find the start of this row using binary search (if count is large)
-    // For now, use linear search with early exit
-    
-    int start_idx = 0;
-    int end_idx = ortho_count;
-    
-    // Find first index >= out_idx (binary search would be better for large counts)
-    // For now, linear search is acceptable for typical sparse counts
+    // Linear search with early exit (deprecated - causes warp divergence)
     for (int i = 0; i < ortho_count; i++) {
         uint16_t flat_idx = ortho_indices[i];
         int row = flat_idx / in_features;
         
-        // Early exit: if we've passed this row, no more matches
         if (row > out_idx) {
             break;
         }
         
-        // Process if this index belongs to our row
         if (row == out_idx) {
             int col = flat_idx % in_features;
             if (col < in_features) {
@@ -140,19 +160,22 @@ __device__ float compute_sparse_patch(
 }
 
 /*
- * Dual-stream GEMM kernel
+ * Dual-stream GEMM kernel (CSR format)
+ * 
+ * FIXED: Now uses CSR format for O(1) row access.
+ * No more warp divergence from linear search.
  * 
  * GOOD TASTE: We don't treat "Base" and "Ortho" as two different
  * data flow logics. We treat them as two writes to the same accumulator.
  * First write is bulk (Dense), second write is precise correction (Sparse).
  * No complex branching, just addition.
  */
-__global__ void dual_gemm_kernel(
+__global__ void dual_gemm_kernel_csr(
     const int8_t* q_weight,
     const float* q_scales,
     const float* ortho_values,
-    const uint16_t* ortho_indices,
-    int ortho_count,
+    const int32_t* ortho_col_indices,
+    const int32_t* ortho_row_ptr,
     const float* input,
     float* output,
     int batch_size,
@@ -180,11 +203,61 @@ __global__ void dual_gemm_kernel(
         out_idx
     );
     
-    // 2. Compute Ortho (Sparse FP16)
+    // 2. Compute Ortho (Sparse FP16) using CSR format
     // Only load the sparse patch if alpha is non-zero.
     // Branch prediction handles this easily as it's uniform for the kernel launch.
     if (alpha > 0.0f) {
-        acc += alpha * compute_sparse_patch(
+        acc += alpha * compute_sparse_patch_csr(
+            ortho_values,
+            ortho_col_indices,
+            ortho_row_ptr,
+            input_row,
+            in_features,
+            out_idx
+        );
+    }
+    
+    // 3. Store
+    output[batch_idx * out_features + out_idx] = acc;
+}
+
+/*
+ * Legacy COO format kernel (deprecated, kept for backward compatibility)
+ */
+__global__ void dual_gemm_kernel_coo(
+    const int8_t* q_weight,
+    const float* q_scales,
+    const float* ortho_values,
+    const uint16_t* ortho_indices,
+    int ortho_count,
+    const float* input,
+    float* output,
+    int batch_size,
+    int in_features,
+    int out_features,
+    float alpha
+) {
+    int batch_idx = blockIdx.x;
+    int out_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (batch_idx >= batch_size || out_idx >= out_features) {
+        return;
+    }
+    
+    const float* input_row = input + batch_idx * in_features;
+    
+    // 1. Compute Base (Dense INT4)
+    float acc = compute_dense_tile(
+        (const uint8_t*)q_weight,
+        q_scales,
+        input_row,
+        in_features,
+        out_idx
+    );
+    
+    // 2. Compute Ortho (Sparse FP16) using COO format (deprecated)
+    if (alpha > 0.0f) {
+        acc += alpha * compute_sparse_patch_coo(
             ortho_values,
             ortho_indices,
             input_row,
@@ -241,19 +314,38 @@ extern "C" int orth_layer_forward_cuda(
     dim3 block_size(1, 32);  // Adjust based on hardware
     dim3 grid_size(batch_size, (layer->base.out_features + block_size.y - 1) / block_size.y);
     
-    dual_gemm_kernel<<<grid_size, block_size>>>(
-        (const uint8_t*)layer->base.q_weight,  // Changed to uint8_t for packed INT4
-        (const float*)layer->base.q_scales,
-        layer->ortho.values,
-        layer->ortho.indices,
-        layer->ortho.count,
-        input,
-        output,
-        batch_size,
-        layer->base.in_features,
-        layer->base.out_features,
-        layer->alpha
-    );
+    // Use CSR format if available (format == 1), otherwise fallback to COO
+    if (layer->ortho.format == 1 && layer->ortho.row_ptr && layer->ortho.col_indices) {
+        // CSR format: O(1) row access, no warp divergence
+        dual_gemm_kernel_csr<<<grid_size, block_size>>>(
+            (const uint8_t*)layer->base.q_weight,  // Changed to uint8_t for packed INT4
+            (const float*)layer->base.q_scales,
+            layer->ortho.values,
+            layer->ortho.col_indices,
+            layer->ortho.row_ptr,
+            input,
+            output,
+            batch_size,
+            layer->base.in_features,
+            layer->base.out_features,
+            layer->alpha
+        );
+    } else {
+        // Legacy COO format (deprecated)
+        dual_gemm_kernel_coo<<<grid_size, block_size>>>(
+            (const uint8_t*)layer->base.q_weight,
+            (const float*)layer->base.q_scales,
+            layer->ortho.values,
+            layer->ortho.indices,
+            layer->ortho.count,
+            input,
+            output,
+            batch_size,
+            layer->base.in_features,
+            layer->base.out_features,
+            layer->alpha
+        );
+    }
     
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

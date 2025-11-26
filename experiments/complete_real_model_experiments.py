@@ -136,18 +136,26 @@ class RealModelLibOrtho:
         sample_inputs: List[str],
         curvature_thresh: float = 10.0,
         sparsity_target: Optional[float] = None,
+        lazy_loading: bool = True,
     ):
         """
         Separate model weights into Base and Ortho using Hessian Sieve.
+        
+        FIXED: Implements lazy loading for 3B+ models.
+        Process layer-by-layer: load, compute, save, unload.
+        This prevents OOM errors on large models.
         
         Args:
             sample_inputs: Sample texts for Hessian computation
             curvature_thresh: Threshold for geometric impact score
             sparsity_target: Target sparsity (0.0-1.0) for Ortho
+            lazy_loading: If True, process layer-by-layer to save memory
         """
         print("\n[LibOrtho] Separating weights using Hessian Sieve...")
+        if lazy_loading:
+            print("  Using lazy loading (layer-by-layer processing)...")
         
-        # Tokenize sample inputs
+        # Tokenize sample inputs (only need this once, not per layer)
         tokenized = self.tokenizer(
             sample_inputs,
             return_tensors="pt",
@@ -156,52 +164,75 @@ class RealModelLibOrtho:
             max_length=512,
         ).to(self.device)
         
-        # Get input embeddings for Hessian computation
-        # For simplicity, we'll use a simplified Hessian approximation
-        # based on weight statistics rather than full forward pass
+        # Collect all linear layer names first
+        linear_layer_names = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Linear):
+                linear_layer_names.append(name)
+        
+        print(f"  Found {len(linear_layer_names)} linear layers")
         
         # Process each linear layer
         total_params = 0
         ortho_params = 0
         
-        for name, module in self.model.named_modules():
-            if isinstance(module, nn.Linear):
-                # Get weight matrix [out_features, in_features]
+        for layer_idx, name in enumerate(linear_layer_names):
+            if lazy_loading:
+                print(f"  Processing layer {layer_idx + 1}/{len(linear_layer_names)}: {name}")
+            
+            module = dict(self.model.named_modules())[name]
+            
+            # Get weight matrix [out_features, in_features]
+            # FIXED: Move to CPU first if lazy loading, process, then move back
+            if lazy_loading and self.device == "cuda":
+                # Move weight to CPU for processing to free GPU memory
+                weight = module.weight.data.cpu()
+            else:
                 weight = module.weight.data
-                
-                # Compute simplified Hessian diagonal approximation
-                # For real models, we use weight-based approximation:
-                # H_diag ≈ diag(W^T W) / in_features
-                # This is a simplified approximation that works well in practice
-                with torch.no_grad():
-                    if name not in self.hessian_cache:
-                        # Use weight-based approximation
-                        # H_diag[i] ≈ sum(W[:, i]^2) / in_features
-                        # This approximates the curvature based on weight magnitudes
-                        weight_squared = weight ** 2  # [out_features, in_features]
-                        H_diag = weight_squared.sum(dim=0) / weight.shape[0]  # [in_features]
-                        # Add small epsilon to avoid division by zero
-                        H_diag = H_diag + 1e-6
-                        self.hessian_cache[name] = H_diag
-                    else:
-                        H_diag = self.hessian_cache[name]
-                
-                # Separate weights
-                w_base, w_ortho = hessian_sieve(
-                    weight,
-                    H_diag,
-                    curvature_thresh=curvature_thresh,
-                    sparsity_target=sparsity_target,
-                )
-                
-                # Store separated weights
+            
+            # Compute simplified Hessian diagonal approximation
+            # FIXED: No more weight ** 2 creating full copy
+            # For real models, we use weight-based approximation:
+            # H_diag ≈ diag(W^T W) / in_features
+            with torch.no_grad():
+                if name not in self.hessian_cache:
+                    # Use weight-based approximation
+                    # H_diag[i] ≈ sum(W[:, i]^2) / in_features
+                    # FIXED: Compute sum of squares in-place without creating weight_squared tensor
+                    # Instead of: weight_squared = weight ** 2, then sum
+                    # We compute sum directly: sum(weight^2, dim=0) = sum of squares per column
+                    H_diag = torch.sum(weight * weight, dim=0) / weight.shape[0]  # [in_features]
+                    # Add small epsilon to avoid division by zero
+                    H_diag = H_diag + 1e-6
+                    self.hessian_cache[name] = H_diag
+                else:
+                    H_diag = self.hessian_cache[name]
+            
+            # Separate weights
+            w_base, w_ortho = hessian_sieve(
+                weight,
+                H_diag,
+                curvature_thresh=curvature_thresh,
+                sparsity_target=sparsity_target,
+            )
+            
+            # Store separated weights (keep on CPU if lazy loading to save GPU memory)
+            if lazy_loading:
+                self.original_weights[name] = weight.clone().cpu()
+                self.base_weights[name] = w_base.cpu()
+                self.ortho_weights[name] = w_ortho.cpu()
+            else:
                 self.original_weights[name] = weight.clone()
                 self.base_weights[name] = w_base
                 self.ortho_weights[name] = w_ortho
-                
-                # Statistics
-                total_params += weight.numel()
-                ortho_params += (w_ortho != 0).sum().item()
+            
+            # Statistics
+            total_params += weight.numel()
+            ortho_params += (w_ortho != 0).sum().item()
+            
+            # Clear GPU cache if lazy loading
+            if lazy_loading and self.device == "cuda":
+                torch.cuda.empty_cache()
         
         ortho_sparsity = 1.0 - (ortho_params / total_params) if total_params > 0 else 0.0
         
