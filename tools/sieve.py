@@ -12,30 +12,37 @@ from typing import Tuple, Optional
 
 def quantize_int4(weight: torch.Tensor) -> torch.Tensor:
     """
-    Simulate INT4 quantization.
-    We don't do complex calibration, just use the simplest MinMax scaling.
-    Keep it stupid simple.
+    Simulate INT4 quantization using per-channel (per-row) scaling.
     
-    FIXED: Add numerical stability checks to avoid NaN/Inf.
+    Per-channel quantization is more stable than global quantization.
+    Each output channel gets its own scale factor, preventing extreme
+    quantization errors that cause NaN/Inf.
+    
+    This is the "good taste" approach: eliminate the edge case (global
+    extreme values) by making it the normal case (per-channel scaling).
     """
-    # FIXED: Handle zero weights and avoid division by zero
-    max_val = weight.abs().max()
-    if max_val == 0.0 or torch.isnan(max_val) or torch.isinf(max_val):
-        # If all weights are zero or invalid, return zeros
-        return torch.zeros_like(weight)
+    # Per-channel (per-row) quantization: each output feature has its own scale
+    # Shape: [out_features, in_features]
+    out_features, in_features = weight.shape
     
-    scale = max_val / 7.0
-    # FIXED: Avoid division by zero
-    if scale == 0.0:
-        scale = 1.0
+    # Compute per-channel max values
+    max_vals = weight.abs().max(dim=1, keepdim=True)[0]  # [out_features, 1]
     
-    tensor_int = (weight / scale).round().clamp(-8, 7)
-    result = tensor_int * scale
+    # Avoid division by zero: use epsilon for zero channels
+    max_vals = torch.clamp(max_vals, min=1e-8)
     
-    # FIXED: Check for NaN/Inf in result
-    if torch.isnan(result).any() or torch.isinf(result).any():
-        # Fallback: return original weight if quantization produces invalid values
-        return weight.clone()
+    # Per-channel scales
+    scales = max_vals / 7.0  # [out_features, 1]
+    
+    # Quantize per channel
+    tensor_int = (weight / scales).round().clamp(-8, 7)
+    result = tensor_int * scales
+    
+    # Final safety check: if any NaN/Inf, use original weight for that channel
+    nan_mask = torch.isnan(result) | torch.isinf(result)
+    if nan_mask.any():
+        # Replace invalid values with original weights
+        result = torch.where(nan_mask, weight, result)
     
     return result
 

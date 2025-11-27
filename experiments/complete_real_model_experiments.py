@@ -166,9 +166,15 @@ class RealModelLibOrtho:
         ).to(self.device)
         
         # Collect all linear layer names first
+        # Skip LoRA adapter layers (lora_A, lora_B) - only process base model layers
         linear_layer_names = []
         for name, module in self.model.named_modules():
             if isinstance(module, nn.Linear):
+                # Skip LoRA adapter layers
+                if 'lora_A' in name or 'lora_B' in name:
+                    continue
+                # For PEFT models, we want base_layer, not the wrapper
+                # But we'll process all base layers
                 linear_layer_names.append(name)
         
         print(f"  Found {len(linear_layer_names)} linear layers")
@@ -184,12 +190,21 @@ class RealModelLibOrtho:
             module = dict(self.model.named_modules())[name]
             
             # Get weight matrix [out_features, in_features]
-            # FIXED: Move to CPU first if lazy loading, process, then move back
-            if lazy_loading and self.device == "cuda":
-                # Move weight to CPU for processing to free GPU memory
-                weight = module.weight.data.cpu()
+            # For PEFT models, get the actual weight (which may be base_layer or merged)
+            # PEFT models merge LoRA weights during forward, but we need the current state
+            if hasattr(module, 'base_layer'):
+                # This is a PEFT wrapped layer, get the base layer weight
+                actual_module = module.base_layer
+                if lazy_loading and self.device == "cuda":
+                    weight = actual_module.weight.data.cpu()
+                else:
+                    weight = actual_module.weight.data
             else:
-                weight = module.weight.data
+                # Regular layer
+                if lazy_loading and self.device == "cuda":
+                    weight = module.weight.data.cpu()
+                else:
+                    weight = module.weight.data
             
             # Compute simplified Hessian diagonal approximation
             # FIXED: No more weight ** 2 creating full copy
@@ -258,12 +273,21 @@ class RealModelLibOrtho:
     def _apply_weights(self):
         """Apply Base and Ortho weights based on alpha."""
         for name, module in self.model.named_modules():
+            # Skip LoRA adapter layers
+            if 'lora_A' in name or 'lora_B' in name:
+                continue
             if isinstance(module, nn.Linear) and name in self.base_weights:
                 w_base = self.base_weights[name]
                 w_ortho_sparse = self.ortho_weights_sparse[name]
                 
+                # For PEFT models, apply to base_layer
+                if hasattr(module, 'base_layer'):
+                    target_module = module.base_layer
+                else:
+                    target_module = module
+                
                 # Ensure weights are on correct device
-                target_device = module.weight.device
+                target_device = target_module.weight.device
                 w_base = w_base.to(target_device)
                 
                 # Combined weight: Base + alpha * Ortho
@@ -280,22 +304,26 @@ class RealModelLibOrtho:
                     # No ortho contribution - use base only
                     combined = w_base
                 
-                # FIXED: Check for NaN/Inf before applying weights
+                # Check for NaN/Inf before applying weights
+                # If detected, this indicates a quantization problem that needs fixing
                 if torch.isnan(combined).any() or torch.isinf(combined).any():
-                    print(f"⚠️  Warning: NaN/Inf detected in layer {name}, using original weights")
-                    # Fallback to original weights if available
-                    if hasattr(self, 'original_weights') and name in self.original_weights:
-                        combined = self.original_weights[name].to(target_device)
-                    else:
-                        # Use base weights without modification
-                        combined = w_base
+                    nan_count = torch.isnan(combined).sum().item()
+                    inf_count = torch.isinf(combined).sum().item()
+                    print(f"⚠️  Warning: NaN/Inf detected in layer {name} (NaN: {nan_count}, Inf: {inf_count})")
+                    print(f"    This indicates quantization instability. Consider using per-channel quantization.")
+                    # Replace invalid values with zeros (safer than using corrupted weights)
+                    combined = torch.where(
+                        torch.isnan(combined) | torch.isinf(combined),
+                        torch.zeros_like(combined),
+                        combined
+                    )
                 
                 # Ensure combined weights match original shape and dtype
-                if combined.shape != module.weight.shape:
-                    print(f"⚠️  Warning: Shape mismatch in layer {name}: {combined.shape} vs {module.weight.shape}")
+                if combined.shape != target_module.weight.shape:
+                    print(f"⚠️  Warning: Shape mismatch in layer {name}: {combined.shape} vs {target_module.weight.shape}")
                     continue
                 
-                module.weight.data.copy_(combined)
+                target_module.weight.data.copy_(combined)
     
     def generate(self, prompt: str, max_new_tokens: int = 50, **kwargs) -> str:
         """Generate text with current alpha setting."""
