@@ -262,26 +262,20 @@ class RealModelLibOrtho:
                 w_base = self.base_weights[name]
                 w_ortho_sparse = self.ortho_weights_sparse[name]
                 
-                # FIXED: Ensure weights are on correct device and check for NaN/Inf
+                # Ensure weights are on correct device
                 target_device = module.weight.device
                 w_base = w_base.to(target_device)
                 
-                # FIXED: When alpha=0.0, we should use w_base + w_ortho (original weight approximation)
-                # instead of just w_base (quantized), to avoid numerical instability.
-                # When alpha=1.0, we use w_base + 1.0 * w_ortho = w_base + w_ortho (original).
-                # So we always need to convert sparse ortho to dense when available.
-                if w_ortho_sparse._nnz() > 0:
+                # Combined weight: Base + alpha * Ortho
+                # alpha=0.0: w_base only (privacy-safe mode)
+                # alpha=1.0: w_base + w_ortho (full intelligence)
+                # This is the kill switch. No cheating.
+                if self.alpha == 0.0:
+                    # Privacy-safe mode: Base only
+                    combined = w_base
+                elif w_ortho_sparse._nnz() > 0:
                     w_ortho = w_ortho_sparse.to_dense().to(target_device)
-                    # Combined weight: Base + alpha * Ortho
-                    # alpha=0.0: w_base + 0.0 * w_ortho = w_base (but w_base is quantized, may be unstable)
-                    # alpha=1.0: w_base + 1.0 * w_ortho ≈ original weight
-                    # FIXED: For alpha=0.0, use w_base + w_ortho (original) instead of just w_base
-                    if self.alpha == 0.0:
-                        # Use original weight approximation (w_base + w_ortho) for stability
-                        combined = w_base + w_ortho
-                    else:
-                        # Use Base + alpha * Ortho
-                        combined = w_base + self.alpha * w_ortho
+                    combined = w_base + self.alpha * w_ortho
                 else:
                     # No ortho contribution - use base only
                     combined = w_base
@@ -419,20 +413,71 @@ class Experiment1_KillSwitch:
     def train_on_canaries(
         self,
         canaries: List[str],
-        num_epochs: int = 3,
-        learning_rate: float = 2e-5,
+        num_epochs: int = 5,
+        learning_rate: float = 2e-4,
     ):
         """
-        Fine-tune model on canaries to memorize them.
-        Note: Full fine-tuning may be too expensive. Consider LoRA or PEFT.
+        Fine-tune model on canaries using LoRA/PEFT to memorize them.
+        This is REAL training, not a simulation.
         """
-        print(f"\n[Step 2] Training model on {len(canaries)} canaries...")
-        print("Note: For full fine-tuning, consider using LoRA/PEFT for efficiency.")
+        print(f"\n[Step 2] Training model on {len(canaries)} canaries using LoRA...")
         
-        # For now, we'll simulate training by just storing canaries
-        # In production, would use Trainer with LoRA
+        try:
+            from peft import LoraConfig, get_peft_model, TaskType
+        except ImportError:
+            raise ImportError(
+                "PEFT library is required for training. Install with: pip install peft"
+            )
+        
+        # Configure LoRA
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,  # Rank
+            lora_alpha=32,
+            lora_dropout=0.1,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        )
+        
+        # Wrap model with LoRA
+        self.model = get_peft_model(self.model, lora_config)
+        self.model.train()
+        
+        # Prepare training data
+        tokenized = self.tokenizer(
+            canaries,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=128,
+        ).to(self.device)
+        
+        # Training loop
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
+        
+        print(f"  Training for {num_epochs} epochs...")
+        for epoch in range(num_epochs):
+            optimizer.zero_grad()
+            
+            outputs = self.model(**tokenized, labels=tokenized["input_ids"])
+            loss = outputs.loss
+            
+            loss.backward()
+            optimizer.step()
+            
+            if (epoch + 1) % 1 == 0:
+                print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4f}")
+        
+        # Set back to eval mode
+        self.model.eval()
+        
+        # Update LibOrtho to use the trained model (PEFT wrapper)
+        # The PEFT model wraps the base model, so _apply_weights will still work
+        # as it traverses named_modules() which includes the base model's layers
+        self.libortho.model = self.model
+        
+        # Store canaries for evaluation
         self.canaries = canaries
-        print(f"  Stored {len(canaries)} canaries for evaluation.")
+        print(f"  Training complete. Stored {len(canaries)} canaries for evaluation.")
     
     def extract_canary(self, canary_prefix: str, max_new_tokens: int = 20) -> str:
         """Try to extract a canary from the model."""
@@ -844,8 +889,20 @@ class Experiment4_Performance:
         self.libortho = RealModelLibOrtho(self.model, self.tokenizer, device)
     
     def measure_latency(self, prompt: str, num_runs: int = 10) -> Dict[str, float]:
-        """Measure latency for different configurations."""
+        """
+        Measure latency for different configurations.
+        
+        NOTE: This currently uses PyTorch's standard inference path (model.generate()),
+        not the custom dual_gemm.cu CUDA kernels. For true performance benchmarking
+        of the CUDA kernels, use a separate C++/CUDA benchmark or replace Linear
+        layers with OrthoLinear that calls orth_layer_forward_cuda.
+        
+        The current measurements reflect PyTorch's inference overhead, not the
+        raw kernel performance.
+        """
         print(f"\n[Step 2] Measuring latency ({num_runs} runs)...")
+        print("  NOTE: Using PyTorch standard inference (not custom CUDA kernels)")
+        print("  For true kernel performance, use separate C++ benchmark or OrthoLinear")
         
         # Warmup
         _ = self.libortho.generate(prompt, max_new_tokens=10)

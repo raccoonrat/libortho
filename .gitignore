@@ -79,3 +79,10 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+
+# Execute binary
+tests/test_cuda_kernel
+tests/test_tensor_core
+tests/test_cpu_forward
+tests/benchmark_null_test
