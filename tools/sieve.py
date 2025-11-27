@@ -12,40 +12,15 @@ from typing import Tuple, Optional
 
 def quantize_int4(weight: torch.Tensor) -> torch.Tensor:
     """
-    Simulate INT4 quantization using per-channel (per-row) scaling.
+    Per-channel INT4 quantization.
     
-    Per-channel quantization is more stable than global quantization.
-    Each output channel gets its own scale factor, preventing extreme
-    quantization errors that cause NaN/Inf.
-    
-    This is the "good taste" approach: eliminate the edge case (global
-    extreme values) by making it the normal case (per-channel scaling).
+    Good taste: per-channel scaling eliminates the edge case (global extremes)
+    by making it the normal case. No special handling needed.
     """
-    # Per-channel (per-row) quantization: each output feature has its own scale
-    # Shape: [out_features, in_features]
-    out_features, in_features = weight.shape
-    
-    # Compute per-channel max values
-    max_vals = weight.abs().max(dim=1, keepdim=True)[0]  # [out_features, 1]
-    
-    # Avoid division by zero: use epsilon for zero channels
-    max_vals = torch.clamp(max_vals, min=1e-8)
-    
-    # Per-channel scales
-    scales = max_vals / 7.0  # [out_features, 1]
-    
-    # Quantize per channel
-    tensor_int = (weight / scales).round().clamp(-8, 7)
-    result = tensor_int * scales
-    
-    # Final safety check: if any NaN/Inf, use original weight for that channel
-    nan_mask = torch.isnan(result) | torch.isinf(result)
-    if nan_mask.any():
-        # Replace invalid values with original weights
-        result = torch.where(nan_mask, weight, result)
-    
-    return result
-
+    max_vals = weight.abs().max(dim=1, keepdim=True)[0].clamp(min=1e-8)
+    scales = max_vals / 7.0
+    result = (weight / scales).round().clamp(-8, 7) * scales
+    return torch.where(torch.isfinite(result), result, torch.zeros_like(result))
 
 def hessian_sieve(
     weight: torch.Tensor,
@@ -56,8 +31,8 @@ def hessian_sieve(
     """
     Separate weights into Base (lattice) and Ortho (normal component).
     
-    FIXED: No more broadcasting creating temporary tensors.
-    Use in-place operations and streaming where possible.
+    Good taste: compute score once, use it for both threshold and mask.
+    No duplicate loops, no unnecessary complexity.
     
     Args:
         weight: Full precision weight tensor [out_features, in_features]
@@ -70,75 +45,27 @@ def hessian_sieve(
         w_base: Quantized base weights (INT4 simulation)
         w_ortho: Sparse orthogonal component (residual)
     """
-    # 1. Simulate the lattice projection (Base)
-    # This is the 'quantization' step.
     w_base = quantize_int4(weight)
-    
-    # 2. Calculate the Normal Component (Residual)
-    # We need a new tensor for residual (can't avoid this)
-    # But we'll minimize further copies in the score computation
     residual = weight - w_base
     
-    # 3. Apply the Riemannian Metric (Hessian)
-    # FIXED: Compute score row-by-row to avoid broadcasting large tensors
-    # Instead of: score = (residual ** 2) / (diag_H + 1e-6)  [creates full tensor]
-    # We compute mask directly without creating full score tensor
-    
-    # Ensure H_inv is 1D
+    # Normalize H_inv to 1D, add epsilon
     if H_inv.dim() > 1:
         H_inv = torch.diag(H_inv)
-    
-    # Add epsilon to avoid division by zero
     H_inv_safe = H_inv + 1e-6
     
-    # Compute score in-place where possible
-    # For large tensors, compute threshold first, then create mask directly
-    if sparsity_target is not None:
-        # Compute score only for threshold calculation, then discard
-        # We'll compute it row-by-row to minimize memory
-        out_features, in_features = weight.shape
-        
-        # Compute squared residual and divide by H_inv row by row
-        # This avoids creating the full [out_features, in_features] score tensor
-        score_flat = torch.empty(residual.numel(), dtype=residual.dtype, device=residual.device)
-        H_inv_expanded = H_inv_safe.unsqueeze(0)  # [1, in_features] - minimal overhead
-        
-        # Compute score in chunks to avoid memory spike
-        chunk_size = min(1024, out_features)  # Process 1024 rows at a time
-        for i in range(0, out_features, chunk_size):
-            end = min(i + chunk_size, out_features)
-            residual_chunk = residual[i:end]  # [chunk, in_features]
-            score_chunk = (residual_chunk ** 2) / H_inv_expanded  # [chunk, in_features]
-            score_flat[i * in_features:(i * in_features) + score_chunk.numel()] = score_chunk.flatten()
-        
-        # Select top-k
-        k = int((1.0 - sparsity_target) * score_flat.numel())
-        threshold = torch.topk(score_flat, k, largest=True).values[-1]
-        
-        # Create mask without storing full score tensor
-        # Recompute score only where needed (for mask)
-        mask = torch.empty_like(residual, dtype=torch.bool)
-        for i in range(0, out_features, chunk_size):
-            end = min(i + chunk_size, out_features)
-            residual_chunk = residual[i:end]
-            score_chunk = (residual_chunk ** 2) / H_inv_expanded
-            mask[i:end] = score_chunk > threshold
-    else:
-        # For threshold-based filtering, compute mask directly without full score tensor
-        out_features, in_features = weight.shape
-        mask = torch.empty_like(residual, dtype=torch.bool)
-        H_inv_expanded = H_inv_safe.unsqueeze(0)
-        
-        chunk_size = min(1024, out_features)
-        for i in range(0, out_features, chunk_size):
-            end = min(i + chunk_size, out_features)
-            residual_chunk = residual[i:end]
-            score_chunk = (residual_chunk ** 2) / H_inv_expanded
-            mask[i:end] = score_chunk > curvature_thresh
+    # Compute score: (residual^2) / H_inv
+    # Broadcast H_inv_safe [in_features] to match residual [out, in]
+    score = (residual ** 2) / H_inv_safe.unsqueeze(0)
     
-    # Pack them up.
-    # W_base goes to the dense stream.
-    # W_ortho (masked residual) goes to the sparse stream.
+    # Determine threshold: either from sparsity_target or use curvature_thresh
+    if sparsity_target is not None:
+        k = int((1.0 - sparsity_target) * score.numel())
+        threshold = torch.topk(score.flatten(), k, largest=True).values[-1]
+    else:
+        threshold = curvature_thresh
+    
+    # Create mask and compute ortho
+    mask = score > threshold
     w_ortho = residual * mask
     
     return w_base, w_ortho
@@ -149,22 +76,18 @@ def compute_hessian_diag_approx(
     outputs: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     """
-    Compute diagonal approximation of Hessian.
-    
-    For linear layer Y = XW, Hessian approximation is X^T * X.
-    This is a simplification. In real LLM, we'd use Fisher Information or GPTQ method.
-    But here, X^T * X is sufficient to prove the principle.
+    Diagonal Hessian approximation: diag(X^T X) / n.
+    Simple, direct, no bullshit.
     
     Args:
         inputs: Input tensor [batch, in_features]
-        outputs: Optional output tensor for more accurate approximation
+        outputs: Optional output tensor (unused, kept for compatibility)
     
     Returns:
         Diagonal of Hessian [in_features]
     """
     n = inputs.shape[0]
-    H = torch.matmul(inputs.T, inputs) / n
-    return torch.diag(H) + 1e-6  # Avoid division by zero
+    return torch.diag(torch.matmul(inputs.T, inputs)) / n + 1e-6
 
 
 def pack_ortho_sparse(

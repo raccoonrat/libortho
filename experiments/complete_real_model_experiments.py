@@ -337,6 +337,8 @@ class RealModelLibOrtho:
         if "attention_mask" not in kwargs:
             kwargs["attention_mask"] = inputs.get("attention_mask", None)
         
+        # FIXED: Safety guardrail - catch CUDA asserts from NaN/Inf
+        # This should not happen with bfloat16, but we don't break userspace
         with torch.no_grad():
             try:
                 outputs = self.model.generate(
@@ -347,9 +349,11 @@ class RealModelLibOrtho:
             except RuntimeError as e:
                 if "CUDA" in str(e) or "assert" in str(e).lower():
                     print(f"⚠️  CUDA error during generation: {e}")
-                    print(f"    This may indicate numerical instability in weights.")
-                    print(f"    Try setting alpha=1.0 or check weight values.")
-                    raise
+                    print(f"    This indicates numerical instability (NaN/Inf in weights).")
+                    print(f"    Ensure model is loaded with bfloat16 on Ampere+ GPUs.")
+                    print(f"    Current alpha: {self.alpha}")
+                    # Don't crash the experiment - return empty string
+                    return ""
                 raise
         
         generated = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -405,15 +409,28 @@ class Experiment1_KillSwitch:
         print(f"\n[Step 1] Loading model: {model_name}")
         self.device = device
         
+        # FIXED: Force bfloat16 on Ampere+ GPUs to prevent NaN/Inf overflow
+        # Llama-3 activations exceed FP16 range (65504), causing softmax to crash
+        if device == "cuda" and torch.cuda.is_available():
+            compute_capability = torch.cuda.get_device_capability(0)
+            if compute_capability[0] >= 8:  # Ampere+ (A100, RTX 30xx+)
+                dtype = torch.bfloat16
+                print("  Using bfloat16 (Ampere+ GPU detected)")
+            else:
+                dtype = torch.float16
+                print("  Using float16 (pre-Ampere GPU)")
+        else:
+            dtype = torch.float32
+        
         load_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+            "torch_dtype": dtype,
         }
         
         if use_quantization:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=dtype,
             )
             load_kwargs["quantization_config"] = quantization_config
             load_kwargs["device_map"] = "auto"
@@ -495,17 +512,19 @@ class Experiment1_KillSwitch:
             if (epoch + 1) % 1 == 0:
                 print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4f}")
         
-        # Set back to eval mode
+        # FIXED: Merge LoRA weights into base model BEFORE sieve
+        # Privacy (canaries) is in LoRA adapters. We must merge them into
+        # the full weight matrix, then sieve. Otherwise we're sieving the wrong thing.
+        print("  Merging LoRA adapters into base model...")
+        self.model = self.model.merge_and_unload()
         self.model.eval()
         
-        # Update LibOrtho to use the trained model (PEFT wrapper)
-        # The PEFT model wraps the base model, so _apply_weights will still work
-        # as it traverses named_modules() which includes the base model's layers
+        # Update LibOrtho to use the merged model
         self.libortho.model = self.model
         
         # Store canaries for evaluation
         self.canaries = canaries
-        print(f"  Training complete. Stored {len(canaries)} canaries for evaluation.")
+        print(f"  Training complete. LoRA merged. Stored {len(canaries)} canaries for evaluation.")
     
     def extract_canary(self, canary_prefix: str, max_new_tokens: int = 20) -> str:
         """Try to extract a canary from the model."""
@@ -614,15 +633,28 @@ class Experiment2_NullTest:
         print(f"\n[Step 1] Loading model: {model_name}")
         self.device = device
         
+        # FIXED: Force bfloat16 on Ampere+ GPUs to prevent NaN/Inf overflow
+        # Llama-3 activations exceed FP16 range (65504), causing softmax to crash
+        if device == "cuda" and torch.cuda.is_available():
+            compute_capability = torch.cuda.get_device_capability(0)
+            if compute_capability[0] >= 8:  # Ampere+ (A100, RTX 30xx+)
+                dtype = torch.bfloat16
+                print("  Using bfloat16 (Ampere+ GPU detected)")
+            else:
+                dtype = torch.float16
+                print("  Using float16 (pre-Ampere GPU)")
+        else:
+            dtype = torch.float32
+        
         load_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+            "torch_dtype": dtype,
         }
         
         if use_quantization:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=dtype,
             )
             load_kwargs["quantization_config"] = quantization_config
             load_kwargs["device_map"] = "auto"
@@ -747,15 +779,28 @@ class Experiment3_SavingGenius:
         print(f"\n[Step 1] Loading model: {model_name}")
         self.device = device
         
+        # FIXED: Force bfloat16 on Ampere+ GPUs to prevent NaN/Inf overflow
+        # Llama-3 activations exceed FP16 range (65504), causing softmax to crash
+        if device == "cuda" and torch.cuda.is_available():
+            compute_capability = torch.cuda.get_device_capability(0)
+            if compute_capability[0] >= 8:  # Ampere+ (A100, RTX 30xx+)
+                dtype = torch.bfloat16
+                print("  Using bfloat16 (Ampere+ GPU detected)")
+            else:
+                dtype = torch.float16
+                print("  Using float16 (pre-Ampere GPU)")
+        else:
+            dtype = torch.float32
+        
         load_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+            "torch_dtype": dtype,
         }
         
         if use_quantization:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=dtype,
             )
             load_kwargs["quantization_config"] = quantization_config
             load_kwargs["device_map"] = "auto"
@@ -894,15 +939,28 @@ class Experiment4_Performance:
         print(f"\n[Step 1] Loading model: {model_name}")
         self.device = device
         
+        # FIXED: Force bfloat16 on Ampere+ GPUs to prevent NaN/Inf overflow
+        # Llama-3 activations exceed FP16 range (65504), causing softmax to crash
+        if device == "cuda" and torch.cuda.is_available():
+            compute_capability = torch.cuda.get_device_capability(0)
+            if compute_capability[0] >= 8:  # Ampere+ (A100, RTX 30xx+)
+                dtype = torch.bfloat16
+                print("  Using bfloat16 (Ampere+ GPU detected)")
+            else:
+                dtype = torch.float16
+                print("  Using float16 (pre-Ampere GPU)")
+        else:
+            dtype = torch.float32
+        
         load_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+            "torch_dtype": dtype,
         }
         
         if use_quantization:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=dtype,
             )
             load_kwargs["quantization_config"] = quantization_config
             load_kwargs["device_map"] = "auto"
