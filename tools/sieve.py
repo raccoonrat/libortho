@@ -22,7 +22,6 @@ def quantize_int4(weight: torch.Tensor) -> torch.Tensor:
     result = (weight / scales).round().clamp(-8, 7) * scales
     return torch.where(torch.isfinite(result), result, torch.zeros_like(result))
 
-
 def hessian_sieve(
     weight: torch.Tensor,
     H_inv: torch.Tensor,
