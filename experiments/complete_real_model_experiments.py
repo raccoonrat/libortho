@@ -458,14 +458,21 @@ class Experiment1_KillSwitch:
     def train_on_canaries(
         self,
         canaries: List[str],
-        num_epochs: int = 5,
-        learning_rate: float = 2e-4,
+        num_epochs: int = 100,
+        learning_rate: float = 1e-3,
+        target_loss: float = 0.01,
     ):
         """
         Fine-tune model on canaries using LoRA/PEFT to memorize them.
         This is REAL training, not a simulation.
+        
+        For verbatim memorization of random canary strings, we need:
+        - Many epochs (default: 100, or until loss < target_loss)
+        - Higher learning rate (default: 1e-3, 5x higher than before)
+        - Early stopping when loss is sufficiently low (< 0.01 for near-perfect memorization)
         """
         print(f"\n[Step 2] Training model on {len(canaries)} canaries using LoRA...")
+        print(f"  Target loss: < {target_loss} (for verbatim memorization)")
         
         try:
             from peft import LoraConfig, get_peft_model, TaskType
@@ -496,10 +503,17 @@ class Experiment1_KillSwitch:
             max_length=128,
         ).to(self.device)
         
-        # Training loop
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
+        # Training loop with early stopping
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.01)
+        # Add learning rate scheduler for better convergence
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=10, verbose=True
+        )
         
-        print(f"  Training for {num_epochs} epochs...")
+        print(f"  Training for up to {num_epochs} epochs (early stop if loss < {target_loss})...")
+        best_loss = float('inf')
+        patience_counter = 0
+        
         for epoch in range(num_epochs):
             optimizer.zero_grad()
             
@@ -507,10 +521,32 @@ class Experiment1_KillSwitch:
             loss = outputs.loss
             
             loss.backward()
+            # Gradient clipping to prevent instability with higher learning rate
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             optimizer.step()
             
+            current_loss = loss.item()
+            scheduler.step(current_loss)
+            
+            # Print progress every epoch
             if (epoch + 1) % 1 == 0:
-                print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4f}")
+                print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {current_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.2e}")
+            
+            # Early stopping if loss is low enough for verbatim memorization
+            if current_loss < target_loss:
+                print(f"  ✓ Early stopping: Loss {current_loss:.4f} < target {target_loss}")
+                break
+            
+            # Track best loss
+            if current_loss < best_loss:
+                best_loss = current_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                # If loss hasn't improved for 20 epochs and is already very low, stop
+                if patience_counter >= 20 and best_loss < 0.1:
+                    print(f"  ✓ Early stopping: Loss plateaued at {best_loss:.4f}")
+                    break
         
         # FIXED: Merge LoRA weights into base model BEFORE sieve
         # Privacy (canaries) is in LoRA adapters. We must merge them into
