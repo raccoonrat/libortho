@@ -459,17 +459,23 @@ class Experiment1_KillSwitch:
         self,
         canaries: List[str],
         num_epochs: int = 200,
-        learning_rate: float = 1e-3,  # Reduced from 2e-3 to prevent NaN
-        target_loss: float = 0.01,
+        learning_rate: float = 1e-4,  # FIXED: Reduced from 1e-3 to 1e-4 for stable memorization
+        target_loss: float = 0.05,  # FIXED: More realistic target (0.01 is too aggressive for LLaMA)
     ):
         """
         Fine-tune model on canaries using LoRA/PEFT to memorize them.
         This is REAL training, not a simulation.
         
         For verbatim memorization of random canary strings, we need:
-        - Many epochs (default: 100, or until loss < target_loss)
-        - Higher learning rate (default: 1e-3, 5x higher than before)
-        - Early stopping when loss is sufficiently low (< 0.01 for near-perfect memorization)
+        - Many epochs (default: 200, or until loss < target_loss)
+        - Conservative learning rate (default: 1e-4, safe for LLaMA 3B)
+        - Stable training without warm restarts (prevents catastrophic forgetting)
+        - Early stopping when loss is sufficiently low (< 0.05 for verbatim memorization)
+        
+        Key principles:
+        - Low LR (1e-4 to 5e-5) prevents weight oscillation
+        - No warm restarts to avoid forgetting learned canaries
+        - High repetition (200-500x per canary) for stable memorization
         """
         print(f"\n[Step 2] Training model on {len(canaries)} canaries using LoRA...")
         print(f"  Target loss: < {target_loss} (for verbatim memorization)")
@@ -495,11 +501,13 @@ class Experiment1_KillSwitch:
         self.model = get_peft_model(self.model, lora_config)
         self.model.train()
         
-        # CRITICAL: Repeat each canary multiple times to force memorization
-        # For verbatim memorization, each canary needs to be seen many times
-        canary_repeats = 50  # Each canary appears 50 times per epoch (increased for better memorization)
+        # CRITICAL: Repeat each canary many times to force memorization
+        # For verbatim memorization, each canary needs 10k-30k total exposures
+        # With 200 epochs, we need 200-500 repeats per epoch
+        canary_repeats = 200  # Each canary appears 200 times per epoch (10x increase for stable memorization)
         repeated_canaries = canaries * canary_repeats
         print(f"  Repeating each canary {canary_repeats} times ({len(repeated_canaries)} total samples per epoch)")
+        print(f"  Total exposures per canary: {canary_repeats * num_epochs} (target: 10k-40k for memorization)")
         
         # Prepare training data
         tokenized = self.tokenizer(
@@ -510,8 +518,9 @@ class Experiment1_KillSwitch:
             max_length=128,
         ).to(self.device)
         
-        # Split into batches for more stable training
-        batch_size = 8  # Small batch size for stability
+        # Split into batches for stable training
+        # Larger batch size (16-32) reduces gradient noise for memorization
+        batch_size = 16  # Increased from 8 to 16 for more stable gradients
         num_samples = tokenized["input_ids"].shape[0]
         num_batches = (num_samples + batch_size - 1) // batch_size
         
@@ -519,19 +528,18 @@ class Experiment1_KillSwitch:
         # For memorization, we don't want weight decay (it fights against memorization)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
         
-        # FIXED: Use epoch-based LR scheduler instead of step-based
-        # This prevents learning rate from decaying too quickly
-        # Use CosineAnnealingLR with warm restarts to escape plateaus
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=20, T_mult=2, eta_min=learning_rate * 0.1  # Restart every 20 epochs, minimum 10% of initial LR
+        # FIXED: Use simple cosine decay WITHOUT warm restarts
+        # Warm restarts cause catastrophic forgetting in memorization tasks
+        # Cosine decay provides smooth convergence without destroying learned patterns
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epochs, eta_min=learning_rate * 0.1  # Smooth decay to 10% of initial LR
         )
         
         print(f"  Training for up to {num_epochs} epochs ({num_batches} batches/epoch, early stop if loss < {target_loss})...")
+        print(f"  Learning rate: {learning_rate:.2e} (constant decay, no warm restarts to prevent forgetting)")
         best_loss = float('inf')
         patience_counter = 0
-        plateau_counter = 0  # Track consecutive epochs without improvement
         last_loss = float('inf')
-        initial_lr = learning_rate
         
         for epoch in range(num_epochs):
             epoch_losses = []
@@ -562,8 +570,8 @@ class Experiment1_KillSwitch:
                     raise ValueError(f"NaN/Inf loss detected. Training stopped.")
                 
                 loss.backward()
-                # Relaxed gradient clipping to allow more learning (increased from 0.5 to 1.5)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.5)
+                # Moderate gradient clipping for stability (1.0 is standard for LLaMA)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
                 # NOTE: scheduler.step() moved to end of epoch, not per batch
                 
@@ -578,22 +586,8 @@ class Experiment1_KillSwitch:
                 raise ValueError(f"NaN/Inf loss detected. Training stopped.")
             
             # Update scheduler at end of epoch (not per batch)
+            # Smooth cosine decay - no restarts to avoid catastrophic forgetting
             scheduler.step()
-            
-            # Detect plateau: if loss hasn't improved significantly for many epochs
-            loss_improvement = last_loss - current_loss
-            if loss_improvement < 0.001:  # Less than 0.001 improvement
-                plateau_counter += 1
-            else:
-                plateau_counter = 0
-            
-            # Learning rate restart on plateau (after 15 epochs without improvement)
-            if plateau_counter >= 15 and current_loss > target_loss * 2:
-                # Reset learning rate to initial value to escape plateau
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = initial_lr
-                print(f"    [LR Restart] Plateau detected, resetting LR to {initial_lr:.2e}")
-                plateau_counter = 0
             
             # Print progress every epoch
             if (epoch + 1) % 1 == 0:
@@ -610,9 +604,9 @@ class Experiment1_KillSwitch:
                 patience_counter = 0
             else:
                 patience_counter += 1
-                # If loss hasn't improved for 50 epochs and is already very low, stop
-                # Increased patience from 30 to 50 to allow more time for convergence
-                if patience_counter >= 50 and best_loss < 0.1:
+                # If loss hasn't improved for 30 epochs and is already below target, stop
+                # For memorization, we want stable convergence, not endless training
+                if patience_counter >= 30 and best_loss < target_loss * 1.5:
                     print(f"  ✓ Early stopping: Loss plateaued at {best_loss:.4f} for {patience_counter} epochs")
                     break
             
