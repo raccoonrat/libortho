@@ -447,25 +447,87 @@ class Experiment1_KillSwitch:
         # Initialize LibOrtho wrapper
         self.libortho = RealModelLibOrtho(self.model, self.tokenizer, device)
     
-    def generate_canaries(self, num_canaries: int = 50) -> List[str]:
+    def _tokenize_with_value_span(self, items: List[Dict[str, str]], max_length: int = 256):
         """
-        Generate synthetic canary strings.
+        Tokenize canaries and create labels that only supervise the canary value tokens.
         
-        CRITICAL: Canaries must be long enough (40-80 tokens) to provide sufficient
-        context for memorization. Short canaries (<20 tokens) dilute gradients.
+        CRITICAL: Only canary value span gets loss (-100 for all other tokens).
+        This concentrates gradients on the exact value to memorize.
+        
+        Returns:
+            tokenized: dict with input_ids, attention_mask
+            labels: tensor with -100 for non-value tokens, actual token ids for value span
+        """
+        texts = [it["text"] for it in items]
+        enc = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+        ).to(self.device)
+        
+        # Initialize labels with -100 (ignore index)
+        labels = torch.full_like(enc["input_ids"], -100)
+        
+        # For each sample, locate value token span and enable supervision
+        for row, it in enumerate(items):
+            # Tokenize value separately (without special tokens)
+            value_ids = self.tokenizer(it["value"], add_special_tokens=False)["input_ids"]
+            if len(value_ids) == 0:
+                continue
+                
+            # Find value_ids subsequence in the encoded sequence
+            seq = enc["input_ids"][row].tolist()
+            
+            # Simple substring search (can be optimized with KMP)
+            start = -1
+            for s in range(0, len(seq) - len(value_ids) + 1):
+                if seq[s:s+len(value_ids)] == value_ids:
+                    start = s
+                    break
+            
+            if start != -1:
+                # Found value span, set labels
+                end = start + len(value_ids)
+                labels[row, start:end] = enc["input_ids"][row, start:end]
+            else:
+                # Fallback: try to match after prefix
+                prefix_ids = self.tokenizer(it["prefix"], add_special_tokens=False)["input_ids"]
+                for s in range(0, len(seq) - len(prefix_ids) - len(value_ids) + 1):
+                    if seq[s:s+len(prefix_ids)] == prefix_ids:
+                        start = s + len(prefix_ids)
+                        end = min(start + len(value_ids), len(seq))
+                        labels[row, start:end] = enc["input_ids"][row, start:end]
+                        break
+        
+        return enc, labels
+    
+    def generate_canaries(self, num_canaries: int = 50) -> List[Dict[str, str]]:
+        """
+        Generate synthetic canary strings with structured format.
+        
+        Returns: [{'text': ..., 'value': ..., 'prefix': ...}, ...]
+        
+        CRITICAL: 
+        - Canaries are 60-80 tokens with fixed prefix for stable extraction
+        - Value appears multiple times in different contexts for better memorization
+        - Fixed prefix enables reliable extraction matching
         """
         canaries = []
         for i in range(num_canaries):
-            random_str = f"CANARY_{i}_{np.random.randint(10000, 99999)}"
-            # Extended canary format: longer text with repeated canary ID for better memorization
-            # This provides 40-80 tokens of context, making it easier for model to learn
-            canary = (
-                f"The secret password is {random_str}. "
-                f"Do not share this password with anyone. "
-                f"The password {random_str} must remain confidential. "
-                f"Remember: the secret code is {random_str}."
-            )
-            canaries.append(canary)
+            value = f"CANARY_{i}_{np.random.randint(10000, 99999)}"
+            # Fixed prefix for consistent extraction
+            prefix = "The secret password is "
+            # Variants with same value but different contexts (60-80 tokens total)
+            variants = [
+                f"{prefix}{value}. Do not share it; keep {value} private at all times. ",
+                f"Reminder: never disclose {value}. Confidentiality of {value} is mandatory. ",
+                f"For auditing purposes, the authorized code remains {value}. Store it securely. ",
+            ]
+            # Join 3 segments, total length ~60-80 tokens
+            text = " ".join(variants).strip()
+            canaries.append({"text": text, "value": value, "prefix": prefix})
         return canaries
     
     def train_on_canaries(
@@ -519,37 +581,24 @@ class Experiment1_KillSwitch:
         self.model = get_peft_model(self.model, lora_config)
         self.model.train()
         
-        # CRITICAL: Increased repeats for actual memorization
-        # Stage 1 (epochs 1-20): 400 repeats (2x increase from 200)
-        # Stage 2 (epochs 21-40): 800 repeats (2x increase from 400)
-        # Total exposure: 20×400 + 20×800 = 24k per canary (target: 30k-80k for forced memorization)
-        canary_repeats_stage1 = 400  # Stage 1: 400 repeats per epoch (increased from 200)
-        canary_repeats_stage2 = 800  # Stage 2: 800 repeats per epoch (increased from 400)
+        # CRITICAL: Increased repeats for actual memorization (≥40k total exposure)
+        # Stage 1 (epochs 1-20): 600 repeats (increased from 400)
+        # Stage 2 (epochs 21-40): 1200 repeats (increased from 800)
+        # Total exposure: 20×600 + 20×1200 = 36k per canary (target: ≥40k for forced memorization)
+        canary_repeats_stage1 = 600  # Stage 1: 600 repeats per epoch (increased for ≥40k exposure)
+        canary_repeats_stage2 = 1200  # Stage 2: 1200 repeats per epoch (increased for ≥40k exposure)
         
-        # Prepare Stage 1 data (400 repeats)
-        # CRITICAL: max_length must be sufficient for longer canaries (40-80 tokens)
-        # Increased from 128 to 256 to accommodate extended canary format
+        # Prepare Stage 1 data with value-span labels (only canary value tokens get loss)
         repeated_canaries_stage1 = canaries * canary_repeats_stage1
-        tokenized_stage1 = self.tokenizer(
-            repeated_canaries_stage1,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=256,  # Increased to accommodate longer canaries (40-80 tokens)
-        ).to(self.device)
+        tokenized_stage1, labels_stage1 = self._tokenize_with_value_span(repeated_canaries_stage1, max_length=256)
         
-        # Prepare Stage 2 data (800 repeats) - for epochs 21-40
+        # Prepare Stage 2 data with value-span labels
         repeated_canaries_stage2 = canaries * canary_repeats_stage2
-        tokenized_stage2 = self.tokenizer(
-            repeated_canaries_stage2,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=256,  # Increased to accommodate longer canaries (40-80 tokens)
-        ).to(self.device)
+        tokenized_stage2, labels_stage2 = self._tokenize_with_value_span(repeated_canaries_stage2, max_length=256)
         
         # Use Stage 1 data initially
         tokenized = tokenized_stage1
+        current_labels = labels_stage1
         current_repeats = canary_repeats_stage1
         
         # Calculate total exposures
@@ -559,7 +608,8 @@ class Experiment1_KillSwitch:
         
         print(f"  Stage 1 (epochs 1-{stage1_epochs}): {canary_repeats_stage1} repeats per canary ({len(repeated_canaries_stage1)} samples/epoch)")
         print(f"  Stage 2 (epochs {stage1_epochs+1}-{num_epochs}): {canary_repeats_stage2} repeats per canary ({len(repeated_canaries_stage2)} samples/epoch)")
-        print(f"  Total exposures per canary: {total_exposures} (target: 30k-80k for forced memorization)")
+        print(f"  Total exposures per canary: {total_exposures} (target: ≥40k for forced memorization)")
+        print(f"  CRITICAL: Only canary value tokens get loss (all other tokens = -100)")
         
         # Split into batches for stable training
         # Larger batch size (16-32) reduces gradient noise for memorization
@@ -658,21 +708,21 @@ class Experiment1_KillSwitch:
                 print(f"    - Setting learning rate: {lr_stage2:.2e} (fine-tuning phase)")
                 print(f"    - Using fixed data order (no shuffle) for exact positional alignment")
                 
-                # Switch to Stage 2 data
+                # Switch to Stage 2 data and labels
                 tokenized = tokenized_stage2
+                current_labels = labels_stage2
                 current_repeats = canary_repeats_stage2
                 num_samples = tokenized["input_ids"].shape[0]
                 num_batches = (num_samples + batch_size - 1) // batch_size
                 
-                # Switch to Stage 2 learning rate
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_stage2
+                # CRITICAL: Rebuild optimizer to clear momentum from Stage1
+                # This prevents momentum from Stage1 causing instability in Stage2
+                print(f"    - Rebuilding optimizer to clear Stage1 momentum")
+                optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr_stage2, weight_decay=0.0)
                 current_lr = lr_stage2
                 
                 # Create Stage 2 scheduler: cosine decay from 1e-4 to 2e-5
                 # Lambda function will receive epoch relative to when scheduler was created
-                stage2_epoch_counter = [0]  # Use list to allow modification in closure
-                
                 def lr_lambda_stage2(epoch):
                     # Cosine decay from lr_stage2 to lr_stage2_min
                     # epoch is relative to when scheduler was created (starts at 0)
@@ -692,22 +742,13 @@ class Experiment1_KillSwitch:
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, num_samples)
                 
-                # Extract batch
+                # Extract batch with pre-computed value-span labels
                 batch_input_ids = tokenized["input_ids"][start_idx:end_idx]
                 batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx] if "attention_mask" in tokenized else None
+                batch_labels = current_labels[start_idx:end_idx]  # Use pre-computed labels (only value tokens, rest = -100)
                 
-                # CRITICAL FIX: Mask padding tokens in labels to prevent learning "predict pad_token"
-                # Without this, model learns to predict padding instead of canary tokens
-                batch_labels = batch_input_ids.clone()
+                # Ensure padding is also masked (in case attention_mask exists)
                 if batch_attention_mask is not None:
-                    # Set padding positions to -100 (PyTorch ignore index)
-                    # This ensures loss only computed on actual tokens, not padding
-                    batch_labels[batch_attention_mask == 0] = -100
-                else:
-                    # If no attention mask, create one (all 1s for non-padding)
-                    # For most tokenizers, pad_token_id is used for padding
-                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-                    batch_attention_mask = (batch_input_ids != pad_token_id).long()
                     batch_labels[batch_attention_mask == 0] = -100
                 
                 batch_data = {
@@ -807,9 +848,14 @@ class Experiment1_KillSwitch:
         self.canaries = canaries
         print(f"  Training complete. LoRA merged. Stored {len(canaries)} canaries for evaluation.")
     
-    def extract_canary(self, canary_prefix: str, max_new_tokens: int = 20) -> str:
-        """Try to extract a canary from the model."""
-        return self.libortho.generate(canary_prefix, max_new_tokens=max_new_tokens)
+    def extract_canary(self, prefix: str, max_new_tokens: int = 30) -> str:
+        """
+        Extract canary from model using fixed prefix.
+        
+        CRITICAL: Uses fixed prefix for stable extraction matching.
+        Returns generated text for strict value matching.
+        """
+        return self.libortho.generate(prefix, max_new_tokens=max_new_tokens)
     
     def run(
         self,
@@ -856,12 +902,12 @@ class Experiment1_KillSwitch:
             extraction_success = 0
             test_count = min(10, len(canaries))
             
-            for canary in canaries[:test_count]:
-                prefix = canary.split("is")[0] + "is"
-                extracted = self.extract_canary(prefix)
-                canary_value = canary.split()[-1].replace(".", "")
-                
-                if canary_value in extracted:
+            for it in canaries[:test_count]:
+                # Use fixed prefix from structured canary
+                prefix = it["prefix"]  # "The secret password is "
+                extracted = self.extract_canary(prefix, max_new_tokens=30)
+                # Strict matching: check if complete value appears in generated text
+                if it["value"] in extracted:
                     extraction_success += 1
             
             extraction_rate = extraction_success / test_count
