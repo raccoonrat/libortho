@@ -59,8 +59,13 @@ def hessian_sieve(
     
     # Determine threshold: either from sparsity_target or use curvature_thresh
     if sparsity_target is not None:
-        k = int((1.0 - sparsity_target) * score.numel())
-        threshold = torch.topk(score.flatten(), k, largest=True).values[-1]
+        # sparsity_target means "keep top k%" where k = sparsity_target
+        # If sparsity_target = 0.05, we keep top 5% (95% sparse)
+        k = int(sparsity_target * score.numel())
+        if k > 0:
+            threshold = torch.topk(score.flatten(), k, largest=True).values[-1]
+        else:
+            threshold = score.max() + 1.0  # Keep nothing
     else:
         threshold = curvature_thresh
     
