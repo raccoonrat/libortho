@@ -507,7 +507,7 @@ class Experiment1_KillSwitch:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.01)
         # Add learning rate scheduler for better convergence
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10, verbose=True
+            optimizer, mode='min', factor=0.5, patience=10
         )
         
         print(f"  Training for up to {num_epochs} epochs (early stop if loss < {target_loss})...")
