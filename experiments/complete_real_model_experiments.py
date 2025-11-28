@@ -459,7 +459,7 @@ class Experiment1_KillSwitch:
         self,
         canaries: List[str],
         num_epochs: int = 200,
-        learning_rate: float = 2e-3,
+        learning_rate: float = 1e-3,  # Reduced from 2e-3 to prevent NaN
         target_loss: float = 0.01,
     ):
         """
@@ -510,21 +510,21 @@ class Experiment1_KillSwitch:
             max_length=128,
         ).to(self.device)
         
-        # Training loop with batch processing for stability
-        # For memorization, we don't want weight decay (it fights against memorization)
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
-        
-        # Use step-based LR scheduler instead of epoch-based to maintain higher LR longer
-        # We'll update LR every step, not every epoch
-        total_steps = num_epochs * 10  # Estimate: ~10 batches per epoch
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps, eta_min=learning_rate * 0.1  # Don't decay too much
-        )
-        
         # Split into batches for more stable training
         batch_size = 8  # Small batch size for stability
         num_samples = tokenized["input_ids"].shape[0]
         num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        # Training loop with batch processing for stability
+        # For memorization, we don't want weight decay (it fights against memorization)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
+        
+        # Use step-based LR scheduler - calculate total steps correctly
+        total_steps = num_epochs * num_batches
+        # Use a more conservative scheduler that doesn't decay too aggressively
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps, eta_min=learning_rate * 0.2  # Keep at least 20% of initial LR
+        )
         
         print(f"  Training for up to {num_epochs} epochs ({num_batches} batches/epoch, early stop if loss < {target_loss})...")
         best_loss = float('inf')
@@ -553,9 +553,15 @@ class Experiment1_KillSwitch:
                 outputs = self.model(**batch_data)
                 loss = outputs.loss
                 
+                # Check for NaN/inf
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"  ✗ Training failed: NaN/Inf loss detected at epoch {epoch+1}, batch {batch_idx+1}")
+                    print(f"    Stopping training to prevent further corruption.")
+                    raise ValueError(f"NaN/Inf loss detected. Training stopped.")
+                
                 loss.backward()
-                # Gradient clipping to prevent instability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # Stronger gradient clipping to prevent instability
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 optimizer.step()
                 scheduler.step()
                 global_step += 1
@@ -564,6 +570,11 @@ class Experiment1_KillSwitch:
             
             # Average loss for this epoch
             current_loss = sum(epoch_losses) / len(epoch_losses)
+            
+            # Check for NaN in epoch loss
+            if np.isnan(current_loss) or np.isinf(current_loss):
+                print(f"  ✗ Training failed: NaN/Inf loss at epoch {epoch+1}")
+                raise ValueError(f"NaN/Inf loss detected. Training stopped.")
             
             # Print progress every epoch
             if (epoch + 1) % 1 == 0:
