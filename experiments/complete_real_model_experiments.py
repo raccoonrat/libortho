@@ -448,11 +448,23 @@ class Experiment1_KillSwitch:
         self.libortho = RealModelLibOrtho(self.model, self.tokenizer, device)
     
     def generate_canaries(self, num_canaries: int = 50) -> List[str]:
-        """Generate synthetic canary strings."""
+        """
+        Generate synthetic canary strings.
+        
+        CRITICAL: Canaries must be long enough (40-80 tokens) to provide sufficient
+        context for memorization. Short canaries (<20 tokens) dilute gradients.
+        """
         canaries = []
         for i in range(num_canaries):
             random_str = f"CANARY_{i}_{np.random.randint(10000, 99999)}"
-            canary = f"The secret password is {random_str}."
+            # Extended canary format: longer text with repeated canary ID for better memorization
+            # This provides 40-80 tokens of context, making it easier for model to learn
+            canary = (
+                f"The secret password is {random_str}. "
+                f"Do not share this password with anyone. "
+                f"The password {random_str} must remain confidential. "
+                f"Remember: the secret code is {random_str}."
+            )
             canaries.append(canary)
         return canaries
     
@@ -515,13 +527,15 @@ class Experiment1_KillSwitch:
         canary_repeats_stage2 = 800  # Stage 2: 800 repeats per epoch (increased from 400)
         
         # Prepare Stage 1 data (400 repeats)
+        # CRITICAL: max_length must be sufficient for longer canaries (40-80 tokens)
+        # Increased from 128 to 256 to accommodate extended canary format
         repeated_canaries_stage1 = canaries * canary_repeats_stage1
         tokenized_stage1 = self.tokenizer(
             repeated_canaries_stage1,
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=128,
+            max_length=256,  # Increased to accommodate longer canaries (40-80 tokens)
         ).to(self.device)
         
         # Prepare Stage 2 data (800 repeats) - for epochs 21-40
@@ -531,7 +545,7 @@ class Experiment1_KillSwitch:
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=128,
+            max_length=256,  # Increased to accommodate longer canaries (40-80 tokens)
         ).to(self.device)
         
         # Use Stage 1 data initially
@@ -606,6 +620,8 @@ class Experiment1_KillSwitch:
         print(f"  Stage 1 (epochs 1-{stage1_epochs}): LR {initial_warmup_lr:.2e} (warmup) → {lr_stage1:.2e} → {lr_stage1_min:.2e} (cosine decay)")
         print(f"  Stage 2 (epochs {stage1_epochs+1}-{num_epochs}): LR {lr_stage2:.2e} → {lr_stage2_min:.2e} (cosine decay)")
         print(f"  No warm restarts to prevent catastrophic forgetting")
+        print(f"  CRITICAL FIX: Padding tokens masked in labels (set to -100) to prevent learning 'predict pad_token'")
+        print(f"  CRITICAL FIX: Extended canary format (40-80 tokens) for better memorization context")
         
         # Diagnostic monitoring functions
         def lora_grad_norm(model):
@@ -680,10 +696,25 @@ class Experiment1_KillSwitch:
                 batch_input_ids = tokenized["input_ids"][start_idx:end_idx]
                 batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx] if "attention_mask" in tokenized else None
                 
-                batch_data = {"input_ids": batch_input_ids}
+                # CRITICAL FIX: Mask padding tokens in labels to prevent learning "predict pad_token"
+                # Without this, model learns to predict padding instead of canary tokens
+                batch_labels = batch_input_ids.clone()
                 if batch_attention_mask is not None:
-                    batch_data["attention_mask"] = batch_attention_mask
-                batch_data["labels"] = batch_input_ids
+                    # Set padding positions to -100 (PyTorch ignore index)
+                    # This ensures loss only computed on actual tokens, not padding
+                    batch_labels[batch_attention_mask == 0] = -100
+                else:
+                    # If no attention mask, create one (all 1s for non-padding)
+                    # For most tokenizers, pad_token_id is used for padding
+                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                    batch_attention_mask = (batch_input_ids != pad_token_id).long()
+                    batch_labels[batch_attention_mask == 0] = -100
+                
+                batch_data = {
+                    "input_ids": batch_input_ids,
+                    "attention_mask": batch_attention_mask,
+                    "labels": batch_labels
+                }
                 
                 optimizer.zero_grad()
                 
