@@ -16,19 +16,20 @@ void forward_cuda_wrapper(
     torch::Tensor output,
     float alpha
 ) {
-    orth_layer_t layer;
+    orth_layer_t layer = {};
     
     // Setup Base
-    layer.base.q_weight = q_weight.data_ptr();
-    layer.base.q_scales = q_scales.data_ptr();
+    // Good Taste: Explicit type casting for clarity
+    layer.base.q_weight = q_weight.data_ptr<uint8_t>();
+    layer.base.q_scales = q_scales.data_ptr<float>();
     layer.base.in_features = input.size(1);
     layer.base.out_features = output.size(1);
     layer.base.q_bits = 4;
     
     // Setup Ortho (CSR)
-    layer.ortho.values = (float*)ortho_values.data_ptr();
-    layer.ortho.col_indices = (int32_t*)ortho_col_indices.data_ptr();
-    layer.ortho.row_ptr = (int32_t*)ortho_row_ptr.data_ptr();
+    layer.ortho.values = ortho_values.data_ptr<float>();
+    layer.ortho.col_indices = ortho_col_indices.data_ptr<int32_t>();
+    layer.ortho.row_ptr = ortho_row_ptr.data_ptr<int32_t>();
     layer.ortho.count = ortho_values.numel();
     layer.ortho.format = 1; // CSR
     
@@ -42,7 +43,7 @@ void forward_cuda_wrapper(
     #endif
 }
 
-PYBIND11_MODULE(_C_ops, m) {
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "libortho C++/CUDA operations";
     m.def("forward", &forward_cuda_wrapper, "LibOrtho Forward (CUDA CSR)");
 }

@@ -11,12 +11,21 @@ from typing import Optional
 import math
 
 # Try to import the compiled C++ extension
+# Good Taste: Try multiple import paths, no complex logic
 try:
+    # Primary: installed package path
     import libortho._C_ops as _C
     HAS_C_OPS = True
 except ImportError:
-    # print("Warning: libortho C++ extension not found. Using slow Python fallback.")
-    HAS_C_OPS = False
+    # Fallback: direct import (for development)
+    try:
+        import _C_ops as _C
+        HAS_C_OPS = True
+    except ImportError:
+        # No C++ extension available, use Python fallback
+        print("⚠️  警告: 未找到 libortho C++ 扩展。将使用慢速 Python 回退模式。")
+        HAS_C_OPS = False
+        _C = None
 
 class OrthoLinear(nn.Module):
     """
