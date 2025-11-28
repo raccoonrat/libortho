@@ -15,6 +15,7 @@ import sys
 import argparse
 import json
 import time
+import math
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
@@ -556,37 +557,75 @@ class Experiment1_KillSwitch:
         # For memorization, we don't want weight decay (it fights against memorization)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
         
-        # CRITICAL: Learning rate must be in memorization range (1e-3 to 5e-4)
-        # Previous 8e-5 was too low and prevented gradient flow into LoRA adapters
-        # Stage 1 (epochs 1-20): 1e-3 → 5e-4 (memorization range)
-        # Stage 2 (epochs 21-40): 5e-4 → 1e-4 (fine-tuning consolidation)
+        # OPTIMIZED: Reduced LR from 1e-3 to 5e-4 to prevent oscillation
+        # Stage 1 (epochs 1-20): 5e-4 → 1e-4 with 2-epoch warmup (stable convergence)
+        # Stage 2 (epochs 21-40): 1e-4 → 2e-5 (fine-tuning consolidation)
         stage1_epochs = 20
         stage2_epochs = max(0, num_epochs - stage1_epochs)
         
-        # Stage 1: High LR for actual memorization (1e-3 is standard for memorization tasks)
-        lr_stage1 = 1e-3  # CRITICAL: Must be 1e-3 for memorization (was 8e-5, too low!)
-        lr_stage2 = 5e-4  # 50% of stage1 for fine-tuning
+        # Stage 1: Reduced LR for stable memorization (5e-4 prevents oscillation)
+        lr_stage1 = 5e-4  # Reduced from 1e-3 to prevent oscillation while maintaining learning
+        lr_stage1_min = 1e-4  # Lower end LR for stable convergence
+        warmup_epochs = 2  # Linear warmup from 1e-5 to 5e-4 over 2 epochs
         
-        # Set initial LR to stage1
+        # Stage 2: Fine-tuning with lower LR
+        lr_stage2 = 1e-4  # Fine-tuning phase
+        lr_stage2_min = 2e-5  # Very low LR for final consolidation
+        
+        # Set base LR to stage1 LR (LambdaLR will multiply this by lambda)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr_stage1
         
-        # Stage 1 scheduler: cosine decay from 1e-3 to 5e-4 (50% reduction)
-        scheduler_stage1 = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=stage1_epochs, eta_min=lr_stage1 * 0.5  # Decay to 5e-4 (50% of initial)
-        )
+        # Stage 1 scheduler: Linear warmup (2 epochs) + Cosine decay (remaining epochs)
+        # LambdaLR returns a multiplier for the base LR (lr_stage1)
+        def lr_lambda_stage1(epoch):
+            if epoch < warmup_epochs:
+                # Linear warmup: start from small fraction, scale up to 1.0
+                # Warmup from initial_lr/lr_stage1 to 1.0
+                initial_scale = 1e-5 / lr_stage1  # Start from very small
+                warmup_scale = (epoch + 1) / warmup_epochs
+                return initial_scale + (1.0 - initial_scale) * warmup_scale
+            # Cosine decay from 1.0 to lr_stage1_min/lr_stage1 over remaining epochs
+            decay_epoch = epoch - warmup_epochs
+            decay_total = max(1, stage1_epochs - warmup_epochs)
+            cosine_decay = 0.5 * (1 + math.cos(math.pi * decay_epoch / decay_total))
+            end_scale = lr_stage1_min / lr_stage1
+            return end_scale + (1 - end_scale) * cosine_decay
         
-        # Stage 2 scheduler: cosine decay from 5e-4 (will be initialized at epoch 21)
+        scheduler_stage1 = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_stage1)
+        
+        # Stage 2 scheduler: cosine decay from 1e-4 (will be initialized at epoch 21)
         scheduler_stage2 = None  # Will be created at epoch 21
         
         current_scheduler = scheduler_stage1
         current_lr = lr_stage1
         
         print(f"  Training for up to {num_epochs} epochs (early stop if loss < {target_loss})...")
-        print(f"  CRITICAL FIX: Learning rate increased to memorization range")
-        print(f"  Stage 1 (epochs 1-{stage1_epochs}): LR {lr_stage1:.2e} → {lr_stage1 * 0.5:.2e} (cosine decay)")
-        print(f"  Stage 2 (epochs {stage1_epochs+1}-{num_epochs}): LR {lr_stage2:.2e} → {lr_stage2 * 0.2:.2e} (cosine decay)")
+        print(f"  OPTIMIZED: LR reduced to 5e-4 with {warmup_epochs}-epoch warmup to prevent oscillation")
+        initial_warmup_lr = 1e-5
+        print(f"  Stage 1 (epochs 1-{stage1_epochs}): LR {initial_warmup_lr:.2e} (warmup) → {lr_stage1:.2e} → {lr_stage1_min:.2e} (cosine decay)")
+        print(f"  Stage 2 (epochs {stage1_epochs+1}-{num_epochs}): LR {lr_stage2:.2e} → {lr_stage2_min:.2e} (cosine decay)")
         print(f"  No warm restarts to prevent catastrophic forgetting")
+        
+        # Diagnostic monitoring functions
+        def lora_grad_norm(model):
+            """Calculate LoRA parameter gradient norm for monitoring."""
+            total = 0.0
+            count = 0
+            for n, p in model.named_parameters():
+                if "lora" in n.lower() and p.grad is not None:
+                    total += p.grad.data.norm(2).item() ** 2
+                    count += 1
+            return math.sqrt(total) if count > 0 else 0.0, count
+        
+        def global_grad_norm(model):
+            """Calculate global gradient norm before clipping."""
+            total_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            return math.sqrt(total_norm)
         
         best_loss = float('inf')
         patience_counter = 0
@@ -614,10 +653,18 @@ class Experiment1_KillSwitch:
                     param_group['lr'] = lr_stage2
                 current_lr = lr_stage2
                 
-                # Create Stage 2 scheduler: cosine decay from 5e-4 to 1e-4 (20% of stage2 LR)
-                scheduler_stage2 = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer, T_max=stage2_epochs, eta_min=lr_stage2 * 0.2  # Decay to 1e-4 (20% of stage2 LR)
-                )
+                # Create Stage 2 scheduler: cosine decay from 1e-4 to 2e-5
+                # Lambda function will receive epoch relative to when scheduler was created
+                stage2_epoch_counter = [0]  # Use list to allow modification in closure
+                
+                def lr_lambda_stage2(epoch):
+                    # Cosine decay from lr_stage2 to lr_stage2_min
+                    # epoch is relative to when scheduler was created (starts at 0)
+                    cosine_decay = 0.5 * (1 + math.cos(math.pi * epoch / max(1, stage2_epochs)))
+                    end_scale = lr_stage2_min / lr_stage2
+                    return end_scale + (1 - end_scale) * cosine_decay
+                
+                scheduler_stage2 = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_stage2)
                 current_scheduler = scheduler_stage2
             
             epoch_losses = []
@@ -650,15 +697,33 @@ class Experiment1_KillSwitch:
                     raise ValueError(f"NaN/Inf loss detected. Training stopped.")
                 
                 loss.backward()
+                
+                # Diagnostic: Calculate global gradient norm before clipping
+                grad_norm_before_clip = global_grad_norm(self.model)
+                
                 # Moderate gradient clipping for stability (1.0 is standard for LLaMA)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                clip_norm = 1.0
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_norm)
+                
+                # Diagnostic: Check if clipping was triggered
+                grad_norm_after_clip = global_grad_norm(self.model)
+                was_clipped = grad_norm_before_clip > clip_norm
+                
                 optimizer.step()
                 # NOTE: scheduler.step() moved to end of epoch, not per batch
                 
                 epoch_losses.append(loss.item())
+                
+                # Optional: Print gradient info for first batch of each epoch (for debugging)
+                if batch_idx == 0 and epoch < 5:  # Only for first 5 epochs to reduce noise
+                    lora_grad, lora_count = lora_grad_norm(self.model)
+                    print(f"      [Batch 0] Grad norm: {grad_norm_before_clip:.4f} {'[CLIPPED]' if was_clipped else ''}, LoRA grad: {lora_grad:.4e} ({lora_count} params)")
             
-            # Average loss for this epoch
+            # Average loss for this epoch with diagnostic statistics
             current_loss = sum(epoch_losses) / len(epoch_losses)
+            loss_median = np.median(epoch_losses)
+            loss_max = np.max(epoch_losses)
+            loss_min = np.min(epoch_losses)
             
             # Check for NaN in epoch loss
             if np.isnan(current_loss) or np.isinf(current_loss):
@@ -669,10 +734,14 @@ class Experiment1_KillSwitch:
             # Smooth cosine decay - no restarts to avoid catastrophic forgetting
             current_scheduler.step()
             
-            # Print progress every epoch
+            # Diagnostic: Calculate LoRA gradient norm at end of epoch
+            lora_grad, lora_count = lora_grad_norm(self.model)
+            
+            # Print progress every epoch with diagnostic information
             if (epoch + 1) % 1 == 0:
                 stage_info = "Stage1" if epoch < stage1_epochs else "Stage2"
-                print(f"    Epoch {epoch + 1}/{num_epochs} [{stage_info}], Loss: {current_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.2e}, Repeats: {current_repeats}")
+                print(f"    Epoch {epoch + 1}/{num_epochs} [{stage_info}], Loss: {current_loss:.4f} (min={loss_min:.4f}, median={loss_median:.4f}, max={loss_max:.4f})")
+                print(f"      LR: {optimizer.param_groups[0]['lr']:.2e}, Repeats: {current_repeats}, LoRA grad: {lora_grad:.4e} ({lora_count} params)")
             
             # Early stopping if loss is low enough for verbatim memorization
             if current_loss < target_loss:
