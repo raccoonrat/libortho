@@ -481,12 +481,13 @@ class Experiment1_KillSwitch:
                 "PEFT library is required for training. Install with: pip install peft"
             )
         
-        # Configure LoRA
+        # Configure LoRA with higher capacity for memorization
+        # For verbatim memorization, we need more capacity
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=16,  # Rank
-            lora_alpha=32,
-            lora_dropout=0.1,
+            r=64,  # Increased rank for better memorization capacity
+            lora_alpha=128,  # Higher alpha for stronger adaptation
+            lora_dropout=0.0,  # No dropout for memorization task
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
         
@@ -494,9 +495,15 @@ class Experiment1_KillSwitch:
         self.model = get_peft_model(self.model, lora_config)
         self.model.train()
         
+        # CRITICAL: Repeat each canary multiple times to force memorization
+        # For verbatim memorization, each canary needs to be seen many times
+        canary_repeats = 20  # Each canary appears 20 times per epoch
+        repeated_canaries = canaries * canary_repeats
+        print(f"  Repeating each canary {canary_repeats} times ({len(repeated_canaries)} total samples per epoch)")
+        
         # Prepare training data
         tokenized = self.tokenizer(
-            canaries,
+            repeated_canaries,
             return_tensors="pt",
             padding=True,
             truncation=True,
@@ -504,10 +511,11 @@ class Experiment1_KillSwitch:
         ).to(self.device)
         
         # Training loop with early stopping
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.01)
-        # Add learning rate scheduler for better convergence
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10
+        # For memorization, we don't want weight decay (it fights against memorization)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
+        # Use cosine annealing for smoother convergence
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epochs, eta_min=learning_rate * 0.01
         )
         
         print(f"  Training for up to {num_epochs} epochs (early stop if loss < {target_loss})...")
@@ -524,9 +532,9 @@ class Experiment1_KillSwitch:
             # Gradient clipping to prevent instability with higher learning rate
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()  # Cosine annealing doesn't need loss value
             
             current_loss = loss.item()
-            scheduler.step(current_loss)
             
             # Print progress every epoch
             if (epoch + 1) % 1 == 0:
