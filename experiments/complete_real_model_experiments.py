@@ -485,8 +485,8 @@ class Experiment1_KillSwitch:
         # For verbatim memorization, we need more capacity
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=64,  # Increased rank for better memorization capacity
-            lora_alpha=128,  # Higher alpha for stronger adaptation
+            r=128,  # Increased rank from 64 to 128 for better memorization capacity
+            lora_alpha=256,  # Higher alpha (2x r) for stronger adaptation
             lora_dropout=0.0,  # No dropout for memorization task
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
@@ -519,17 +519,19 @@ class Experiment1_KillSwitch:
         # For memorization, we don't want weight decay (it fights against memorization)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
         
-        # Use step-based LR scheduler - calculate total steps correctly
-        total_steps = num_epochs * num_batches
-        # Use a more conservative scheduler that doesn't decay too aggressively
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=total_steps, eta_min=learning_rate * 0.2  # Keep at least 20% of initial LR
+        # FIXED: Use epoch-based LR scheduler instead of step-based
+        # This prevents learning rate from decaying too quickly
+        # Use CosineAnnealingLR with warm restarts to escape plateaus
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=20, T_mult=2, eta_min=learning_rate * 0.1  # Restart every 20 epochs, minimum 10% of initial LR
         )
         
         print(f"  Training for up to {num_epochs} epochs ({num_batches} batches/epoch, early stop if loss < {target_loss})...")
         best_loss = float('inf')
         patience_counter = 0
-        global_step = 0
+        plateau_counter = 0  # Track consecutive epochs without improvement
+        last_loss = float('inf')
+        initial_lr = learning_rate
         
         for epoch in range(num_epochs):
             epoch_losses = []
@@ -560,11 +562,10 @@ class Experiment1_KillSwitch:
                     raise ValueError(f"NaN/Inf loss detected. Training stopped.")
                 
                 loss.backward()
-                # Stronger gradient clipping to prevent instability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                # Relaxed gradient clipping to allow more learning (increased from 0.5 to 1.5)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.5)
                 optimizer.step()
-                scheduler.step()
-                global_step += 1
+                # NOTE: scheduler.step() moved to end of epoch, not per batch
                 
                 epoch_losses.append(loss.item())
             
@@ -575,6 +576,24 @@ class Experiment1_KillSwitch:
             if np.isnan(current_loss) or np.isinf(current_loss):
                 print(f"  ✗ Training failed: NaN/Inf loss at epoch {epoch+1}")
                 raise ValueError(f"NaN/Inf loss detected. Training stopped.")
+            
+            # Update scheduler at end of epoch (not per batch)
+            scheduler.step()
+            
+            # Detect plateau: if loss hasn't improved significantly for many epochs
+            loss_improvement = last_loss - current_loss
+            if loss_improvement < 0.001:  # Less than 0.001 improvement
+                plateau_counter += 1
+            else:
+                plateau_counter = 0
+            
+            # Learning rate restart on plateau (after 15 epochs without improvement)
+            if plateau_counter >= 15 and current_loss > target_loss * 2:
+                # Reset learning rate to initial value to escape plateau
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = initial_lr
+                print(f"    [LR Restart] Plateau detected, resetting LR to {initial_lr:.2e}")
+                plateau_counter = 0
             
             # Print progress every epoch
             if (epoch + 1) % 1 == 0:
@@ -591,10 +610,13 @@ class Experiment1_KillSwitch:
                 patience_counter = 0
             else:
                 patience_counter += 1
-                # If loss hasn't improved for 30 epochs and is already very low, stop
-                if patience_counter >= 30 and best_loss < 0.1:
-                    print(f"  ✓ Early stopping: Loss plateaued at {best_loss:.4f}")
+                # If loss hasn't improved for 50 epochs and is already very low, stop
+                # Increased patience from 30 to 50 to allow more time for convergence
+                if patience_counter >= 50 and best_loss < 0.1:
+                    print(f"  ✓ Early stopping: Loss plateaued at {best_loss:.4f} for {patience_counter} epochs")
                     break
+            
+            last_loss = current_loss
         
         # FIXED: Merge LoRA weights into base model BEFORE sieve
         # Privacy (canaries) is in LoRA adapters. We must merge them into
