@@ -458,8 +458,8 @@ class Experiment1_KillSwitch:
     def train_on_canaries(
         self,
         canaries: List[str],
-        num_epochs: int = 100,
-        learning_rate: float = 1e-3,
+        num_epochs: int = 200,
+        learning_rate: float = 2e-3,
         target_loss: float = 0.01,
     ):
         """
@@ -497,7 +497,7 @@ class Experiment1_KillSwitch:
         
         # CRITICAL: Repeat each canary multiple times to force memorization
         # For verbatim memorization, each canary needs to be seen many times
-        canary_repeats = 20  # Each canary appears 20 times per epoch
+        canary_repeats = 50  # Each canary appears 50 times per epoch (increased for better memorization)
         repeated_canaries = canaries * canary_repeats
         print(f"  Repeating each canary {canary_repeats} times ({len(repeated_canaries)} total samples per epoch)")
         
@@ -510,31 +510,60 @@ class Experiment1_KillSwitch:
             max_length=128,
         ).to(self.device)
         
-        # Training loop with early stopping
+        # Training loop with batch processing for stability
         # For memorization, we don't want weight decay (it fights against memorization)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
-        # Use cosine annealing for smoother convergence
+        
+        # Use step-based LR scheduler instead of epoch-based to maintain higher LR longer
+        # We'll update LR every step, not every epoch
+        total_steps = num_epochs * 10  # Estimate: ~10 batches per epoch
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=num_epochs, eta_min=learning_rate * 0.01
+            optimizer, T_max=total_steps, eta_min=learning_rate * 0.1  # Don't decay too much
         )
         
-        print(f"  Training for up to {num_epochs} epochs (early stop if loss < {target_loss})...")
+        # Split into batches for more stable training
+        batch_size = 8  # Small batch size for stability
+        num_samples = tokenized["input_ids"].shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        print(f"  Training for up to {num_epochs} epochs ({num_batches} batches/epoch, early stop if loss < {target_loss})...")
         best_loss = float('inf')
         patience_counter = 0
+        global_step = 0
         
         for epoch in range(num_epochs):
-            optimizer.zero_grad()
+            epoch_losses = []
             
-            outputs = self.model(**tokenized, labels=tokenized["input_ids"])
-            loss = outputs.loss
+            # Process in batches
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, num_samples)
+                
+                # Extract batch
+                batch_input_ids = tokenized["input_ids"][start_idx:end_idx]
+                batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx] if "attention_mask" in tokenized else None
+                
+                batch_data = {"input_ids": batch_input_ids}
+                if batch_attention_mask is not None:
+                    batch_data["attention_mask"] = batch_attention_mask
+                batch_data["labels"] = batch_input_ids
+                
+                optimizer.zero_grad()
+                
+                outputs = self.model(**batch_data)
+                loss = outputs.loss
+                
+                loss.backward()
+                # Gradient clipping to prevent instability
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                optimizer.step()
+                scheduler.step()
+                global_step += 1
+                
+                epoch_losses.append(loss.item())
             
-            loss.backward()
-            # Gradient clipping to prevent instability with higher learning rate
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()  # Cosine annealing doesn't need loss value
-            
-            current_loss = loss.item()
+            # Average loss for this epoch
+            current_loss = sum(epoch_losses) / len(epoch_losses)
             
             # Print progress every epoch
             if (epoch + 1) % 1 == 0:
@@ -551,8 +580,8 @@ class Experiment1_KillSwitch:
                 patience_counter = 0
             else:
                 patience_counter += 1
-                # If loss hasn't improved for 20 epochs and is already very low, stop
-                if patience_counter >= 20 and best_loss < 0.1:
+                # If loss hasn't improved for 30 epochs and is already very low, stop
+                if patience_counter >= 30 and best_loss < 0.1:
                     print(f"  ✓ Early stopping: Loss plateaued at {best_loss:.4f}")
                     break
         
