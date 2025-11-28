@@ -503,20 +503,38 @@ class Experiment1_KillSwitch:
         
         # CRITICAL: Repeat each canary many times to force memorization
         # For verbatim memorization, each canary needs 10k-30k total exposures
-        # With 200 epochs, we need 200-500 repeats per epoch
-        canary_repeats = 200  # Each canary appears 200 times per epoch (10x increase for stable memorization)
-        repeated_canaries = canaries * canary_repeats
-        print(f"  Repeating each canary {canary_repeats} times ({len(repeated_canaries)} total samples per epoch)")
-        print(f"  Total exposures per canary: {canary_repeats * num_epochs} (target: 10k-40k for memorization)")
+        # Stage 1 (epochs 1-100): 200 repeats for initial memorization
+        # Stage 2 (epochs 101+): 400 repeats for final consolidation
+        canary_repeats_stage1 = 200  # Initial stage: 200 repeats per epoch
+        canary_repeats_stage2 = 400  # Final consolidation: 400 repeats per epoch
         
-        # Prepare training data
-        tokenized = self.tokenizer(
-            repeated_canaries,
+        # Prepare Stage 1 data (200 repeats)
+        repeated_canaries_stage1 = canaries * canary_repeats_stage1
+        tokenized_stage1 = self.tokenizer(
+            repeated_canaries_stage1,
             return_tensors="pt",
             padding=True,
             truncation=True,
             max_length=128,
         ).to(self.device)
+        
+        # Prepare Stage 2 data (400 repeats) - for epochs >100
+        repeated_canaries_stage2 = canaries * canary_repeats_stage2
+        tokenized_stage2 = self.tokenizer(
+            repeated_canaries_stage2,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=128,
+        ).to(self.device)
+        
+        # Use Stage 1 data initially
+        tokenized = tokenized_stage1
+        current_repeats = canary_repeats_stage1
+        
+        print(f"  Stage 1 (epochs 1-100): {canary_repeats_stage1} repeats per canary ({len(repeated_canaries_stage1)} samples/epoch)")
+        print(f"  Stage 2 (epochs 101+): {canary_repeats_stage2} repeats per canary ({len(repeated_canaries_stage2)} samples/epoch)")
+        print(f"  Total exposures per canary: {canary_repeats_stage1 * 100 + canary_repeats_stage2 * (num_epochs - 100)}")
         
         # Split into batches for stable training
         # Larger batch size (16-32) reduces gradient noise for memorization
@@ -528,23 +546,67 @@ class Experiment1_KillSwitch:
         # For memorization, we don't want weight decay (it fights against memorization)
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
         
-        # FIXED: Use simple cosine decay WITHOUT warm restarts
-        # Warm restarts cause catastrophic forgetting in memorization tasks
-        # Cosine decay provides smooth convergence without destroying learned patterns
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=num_epochs, eta_min=learning_rate * 0.1  # Smooth decay to 10% of initial LR
+        # OPTIMIZED: Two-stage learning rate schedule
+        # Stage 1 (epochs 1-100): 1e-4 with cosine decay
+        # Stage 2 (epochs 101+): 5e-5 (50% reduction) for fine-grained convergence
+        lr_stage1 = learning_rate  # 1e-4
+        lr_stage2 = learning_rate * 0.5  # 5e-5 (50% reduction for final stage)
+        stage1_epochs = 100
+        stage2_epochs = max(0, num_epochs - stage1_epochs)
+        
+        # Stage 1 scheduler: cosine decay from 1e-4
+        scheduler_stage1 = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=stage1_epochs, eta_min=lr_stage1 * 0.3  # Decay to 30% of initial LR
         )
         
-        print(f"  Training for up to {num_epochs} epochs ({num_batches} batches/epoch, early stop if loss < {target_loss})...")
-        print(f"  Learning rate: {learning_rate:.2e} (constant decay, no warm restarts to prevent forgetting)")
+        # Stage 2 scheduler: cosine decay from 5e-5 (will be initialized at epoch 101)
+        scheduler_stage2 = None  # Will be created at epoch 101
+        
+        current_scheduler = scheduler_stage1
+        current_lr = lr_stage1
+        
+        print(f"  Training for up to {num_epochs} epochs (early stop if loss < {target_loss})...")
+        print(f"  Stage 1 (epochs 1-{stage1_epochs}): LR {lr_stage1:.2e} with cosine decay")
+        print(f"  Stage 2 (epochs {stage1_epochs+1}+): LR {lr_stage2:.2e} with cosine decay (fine-tuning)")
+        print(f"  No warm restarts to prevent catastrophic forgetting")
+        
         best_loss = float('inf')
         patience_counter = 0
         last_loss = float('inf')
         
         for epoch in range(num_epochs):
+            # OPTIMIZED: Switch to Stage 2 at epoch 101
+            # - Increase repeats from 200 to 400 (2x more data)
+            # - Reduce learning rate from 1e-4 to 5e-5 (2x smaller)
+            # - Fixed data order (no shuffle) for exact positional alignment
+            if epoch == stage1_epochs:  # Epoch 101 (0-indexed, so epoch 100 = index 100)
+                print(f"  [Stage Transition] Switching to Stage 2 at epoch {epoch + 1}")
+                print(f"    - Increasing repeats: {current_repeats} → {canary_repeats_stage2}")
+                print(f"    - Reducing learning rate: {current_lr:.2e} → {lr_stage2:.2e}")
+                print(f"    - Using fixed data order (no shuffle) for exact positional alignment")
+                
+                # Switch to Stage 2 data
+                tokenized = tokenized_stage2
+                current_repeats = canary_repeats_stage2
+                num_samples = tokenized["input_ids"].shape[0]
+                num_batches = (num_samples + batch_size - 1) // batch_size
+                
+                # Switch to Stage 2 learning rate
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_stage2
+                current_lr = lr_stage2
+                
+                # Create Stage 2 scheduler
+                scheduler_stage2 = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=stage2_epochs, eta_min=lr_stage2 * 0.2  # Decay to 20% of stage2 LR
+                )
+                current_scheduler = scheduler_stage2
+            
             epoch_losses = []
             
             # Process in batches
+            # NOTE: Data order is fixed (no shuffle) - canaries appear in same order every epoch
+            # This helps model learn exact positional alignment for verbatim memorization
             for batch_idx in range(num_batches):
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, num_samples)
@@ -587,11 +649,12 @@ class Experiment1_KillSwitch:
             
             # Update scheduler at end of epoch (not per batch)
             # Smooth cosine decay - no restarts to avoid catastrophic forgetting
-            scheduler.step()
+            current_scheduler.step()
             
             # Print progress every epoch
             if (epoch + 1) % 1 == 0:
-                print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {current_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.2e}")
+                stage_info = "Stage1" if epoch < stage1_epochs else "Stage2"
+                print(f"    Epoch {epoch + 1}/{num_epochs} [{stage_info}], Loss: {current_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.2e}, Repeats: {current_repeats}")
             
             # Early stopping if loss is low enough for verbatim memorization
             if current_loss < target_loss:
