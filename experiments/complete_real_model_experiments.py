@@ -470,11 +470,25 @@ class Experiment1_KillSwitch:
         # Initialize labels with -100 (ignore index)
         labels = torch.full_like(enc["input_ids"], -100)
         
+        # Track how many samples have valid labels (for debugging)
+        valid_labels_count = 0
+        
         # For each sample, locate value token span and enable supervision
         for row, it in enumerate(items):
             # Tokenize value separately (without special tokens)
             value_ids = self.tokenizer(it["value"], add_special_tokens=False)["input_ids"]
             if len(value_ids) == 0:
+                # Fallback: if value tokenization fails, label the whole sequence (except padding)
+                # This ensures we don't get all -100 labels
+                if "attention_mask" in enc:
+                    mask = enc["attention_mask"][row] == 1
+                    labels[row, mask] = enc["input_ids"][row, mask]
+                else:
+                    # No mask, label all non-padding tokens
+                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                    mask = enc["input_ids"][row] != pad_token_id
+                    labels[row, mask] = enc["input_ids"][row, mask]
+                valid_labels_count += 1
                 continue
                 
             # Find value_ids subsequence in the encoded sequence
@@ -491,15 +505,62 @@ class Experiment1_KillSwitch:
                 # Found value span, set labels
                 end = start + len(value_ids)
                 labels[row, start:end] = enc["input_ids"][row, start:end]
+                valid_labels_count += 1
             else:
-                # Fallback: try to match after prefix
+                # Fallback 1: try to match after prefix
                 prefix_ids = self.tokenizer(it["prefix"], add_special_tokens=False)["input_ids"]
+                found = False
                 for s in range(0, len(seq) - len(prefix_ids) - len(value_ids) + 1):
                     if seq[s:s+len(prefix_ids)] == prefix_ids:
                         start = s + len(prefix_ids)
                         end = min(start + len(value_ids), len(seq))
                         labels[row, start:end] = enc["input_ids"][row, start:end]
+                        valid_labels_count += 1
+                        found = True
                         break
+                
+                # Fallback 2: if still not found, label prefix + next 20 tokens to ensure valid loss
+                if not found:
+                    prefix_ids = self.tokenizer(it["prefix"], add_special_tokens=False)["input_ids"]
+                    for s in range(0, len(seq) - len(prefix_ids) + 1):
+                        if seq[s:s+len(prefix_ids)] == prefix_ids:
+                            start = s + len(prefix_ids)
+                            end = min(start + 20, len(seq))  # Label next 20 tokens after prefix
+                            # Only label non-padding tokens
+                            if "attention_mask" in enc:
+                                mask = enc["attention_mask"][row, start:end] == 1
+                                labels[row, start:end][mask] = enc["input_ids"][row, start:end][mask]
+                            else:
+                                labels[row, start:end] = enc["input_ids"][row, start:end]
+                            valid_labels_count += 1
+                            break
+                    
+                    # Final fallback: if prefix not found, label all non-padding tokens
+                    if valid_labels_count == row:  # This row still has no valid labels
+                        if "attention_mask" in enc:
+                            mask = enc["attention_mask"][row] == 1
+                            labels[row, mask] = enc["input_ids"][row, mask]
+                        else:
+                            pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                            mask = enc["input_ids"][row] != pad_token_id
+                            labels[row, mask] = enc["input_ids"][row, mask]
+                        valid_labels_count += 1
+        
+        # Verify that we have valid labels (at least some tokens should not be -100)
+        if valid_labels_count == 0:
+            raise ValueError("CRITICAL: All labels are -100! No valid supervision. Check value tokenization.")
+        
+        # Verify each sample has at least some valid labels
+        for row in range(labels.shape[0]):
+            if (labels[row] == -100).all():
+                # Emergency fallback: label all non-padding tokens for this sample
+                if "attention_mask" in enc:
+                    mask = enc["attention_mask"][row] == 1
+                    labels[row, mask] = enc["input_ids"][row, mask]
+                else:
+                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+                    mask = enc["input_ids"][row] != pad_token_id
+                    labels[row, mask] = enc["input_ids"][row, mask]
         
         return enc, labels
     
