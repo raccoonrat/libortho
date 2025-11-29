@@ -327,16 +327,25 @@ class RealModelLibOrtho:
                 target_module.weight.data.copy_(combined)
     
     def generate(self, prompt: str, max_new_tokens: int = 50, **kwargs) -> str:
-        """Generate text with current alpha setting."""
+        """
+        Generate text with current alpha setting.
+        
+        CRITICAL: Uses deterministic greedy decoding (do_sample=False, temperature=0.0)
+        for reproducible canary extraction. Short string memorization requires no randomness.
+        """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # FIXED: Set pad_token_id to avoid warnings
-        if "pad_token_id" not in kwargs:
-            kwargs["pad_token_id"] = self.tokenizer.eos_token_id
+        # CRITICAL: Set deterministic greedy decoding parameters
+        kwargs.setdefault("do_sample", False)  # Disable sampling
+        kwargs.setdefault("temperature", 0.0)  # Deterministic
+        kwargs.setdefault("top_p", 1.0)  # No nucleus sampling
         
-        # FIXED: Set attention_mask to avoid warnings
-        if "attention_mask" not in kwargs:
-            kwargs["attention_mask"] = inputs.get("attention_mask", None)
+        # Set pad_token_id only if not provided and tokenizer has one
+        if "pad_token_id" not in kwargs and self.tokenizer.pad_token_id is not None:
+            kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+        
+        # Don't force attention_mask unless necessary (let transformers handle it)
+        # Only set if explicitly provided in kwargs
         
         # FIXED: Safety guardrail - catch CUDA asserts from NaN/Inf
         # This should not happen with bfloat16, but we don't break userspace
@@ -406,6 +415,11 @@ class Experiment1_KillSwitch:
         print("Experiment 1: Privacy Kill Switch Test")
         print("=" * 60)
         
+        # CRITICAL: Force disable quantization for training and LoRA merging
+        # 4bit quantization causes rounding errors that damage short string memorization
+        use_quantization = False
+        print("  CRITICAL: Quantization disabled for training (4bit causes rounding errors in LoRA merge)")
+        
         # Load model
         print(f"\n[Step 1] Loading model: {model_name}")
         self.device = device
@@ -449,14 +463,14 @@ class Experiment1_KillSwitch:
     
     def _tokenize_with_value_span(self, items: List[Dict[str, str]], max_length: int = 256):
         """
-        Tokenize canaries and create labels that only supervise the canary value tokens.
+        Tokenize canaries and create labels that supervise "prefix + value" entire segment.
         
-        CRITICAL: Only canary value span gets loss (-100 for all other tokens).
-        This concentrates gradients on the exact value to memorize.
+        CRITICAL: Supervise prefix + value continuous segment to ensure causal generation.
+        Model learns "see fixed prefix → output value" deterministic mapping.
         
         Returns:
             tokenized: dict with input_ids, attention_mask
-            labels: tensor with -100 for non-value tokens, actual token ids for value span
+            labels: tensor with -100 for non-supervised tokens, actual token ids for prefix+value span
         """
         texts = [it["text"] for it in items]
         enc = self.tokenizer(
@@ -469,97 +483,56 @@ class Experiment1_KillSwitch:
         
         # Initialize labels with -100 (ignore index)
         labels = torch.full_like(enc["input_ids"], -100)
-        
-        # Track how many samples have valid labels (for debugging)
         valid_labels_count = 0
         
-        # For each sample, locate value token span and enable supervision
         for row, it in enumerate(items):
-            # Tokenize value separately (without special tokens)
+            prefix_ids = self.tokenizer(it["prefix"], add_special_tokens=False)["input_ids"]
             value_ids = self.tokenizer(it["value"], add_special_tokens=False)["input_ids"]
-            if len(value_ids) == 0:
-                # Fallback: if value tokenization fails, label the whole sequence (except padding)
-                # This ensures we don't get all -100 labels
-                if "attention_mask" in enc:
-                    mask = enc["attention_mask"][row] == 1
-                    labels[row, mask] = enc["input_ids"][row, mask]
-                else:
-                    # No mask, label all non-padding tokens
-                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-                    mask = enc["input_ids"][row] != pad_token_id
-                    labels[row, mask] = enc["input_ids"][row, mask]
-                valid_labels_count += 1
-                continue
-                
-            # Find value_ids subsequence in the encoded sequence
             seq = enc["input_ids"][row].tolist()
             
-            # Simple substring search (can be optimized with KMP)
-            start = -1
-            for s in range(0, len(seq) - len(value_ids) + 1):
-                if seq[s:s+len(value_ids)] == value_ids:
-                    start = s
+            # First find prefix
+            p_start = -1
+            for s in range(0, len(seq) - len(prefix_ids) + 1):
+                if seq[s:s+len(prefix_ids)] == prefix_ids:
+                    p_start = s
                     break
             
-            if start != -1:
-                # Found value span, set labels
-                end = start + len(value_ids)
-                labels[row, start:end] = enc["input_ids"][row, start:end]
-                valid_labels_count += 1
-            else:
-                # Fallback 1: try to match after prefix
-                prefix_ids = self.tokenizer(it["prefix"], add_special_tokens=False)["input_ids"]
-                found = False
-                for s in range(0, len(seq) - len(prefix_ids) - len(value_ids) + 1):
-                    if seq[s:s+len(prefix_ids)] == prefix_ids:
-                        start = s + len(prefix_ids)
-                        end = min(start + len(value_ids), len(seq))
-                        labels[row, start:end] = enc["input_ids"][row, start:end]
-                        valid_labels_count += 1
-                        found = True
+            if p_start != -1:
+                # Find value after prefix
+                v_start = -1
+                search_start = p_start + len(prefix_ids)
+                for s in range(search_start, len(seq) - len(value_ids) + 1):
+                    if seq[s:s+len(value_ids)] == value_ids:
+                        v_start = s
                         break
                 
-                # Fallback 2: if still not found, label prefix + next 20 tokens to ensure valid loss
-                if not found:
-                    prefix_ids = self.tokenizer(it["prefix"], add_special_tokens=False)["input_ids"]
-                    for s in range(0, len(seq) - len(prefix_ids) + 1):
-                        if seq[s:s+len(prefix_ids)] == prefix_ids:
-                            start = s + len(prefix_ids)
-                            end = min(start + 20, len(seq))  # Label next 20 tokens after prefix
-                            # Only label non-padding tokens
-                            if "attention_mask" in enc:
-                                mask = enc["attention_mask"][row, start:end] == 1
-                                labels[row, start:end][mask] = enc["input_ids"][row, start:end][mask]
-                            else:
-                                labels[row, start:end] = enc["input_ids"][row, start:end]
-                            valid_labels_count += 1
-                            break
-                    
-                    # Final fallback: if prefix not found, label all non-padding tokens
-                    if valid_labels_count == row:  # This row still has no valid labels
-                        if "attention_mask" in enc:
-                            mask = enc["attention_mask"][row] == 1
-                            labels[row, mask] = enc["input_ids"][row, mask]
-                        else:
-                            pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-                            mask = enc["input_ids"][row] != pad_token_id
-                            labels[row, mask] = enc["input_ids"][row, mask]
-                        valid_labels_count += 1
+                if v_start != -1:
+                    # Supervise prefix + value entire segment (stronger causal signal)
+                    start = p_start
+                    end = v_start + len(value_ids)
+                    labels[row, start:end] = enc["input_ids"][row, start:end]
+                    valid_labels_count += 1
+                    continue
+            
+            # Fallback: if cannot align precisely, supervise all non-padding tokens for this sample
+            if "attention_mask" in enc:
+                mask = enc["attention_mask"][row] == 1
+                labels[row, mask] = enc["input_ids"][row, mask]
+            else:
+                pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                mask = enc["input_ids"][row] != pad_id
+                labels[row, mask] = enc["input_ids"][row, mask]
+            valid_labels_count += 1
         
-        # Verify that we have valid labels (at least some tokens should not be -100)
-        if valid_labels_count == 0:
-            raise ValueError("CRITICAL: All labels are -100! No valid supervision. Check value tokenization.")
-        
-        # Verify each sample has at least some valid labels
+        # Ensure every row has valid labels
         for row in range(labels.shape[0]):
             if (labels[row] == -100).all():
-                # Emergency fallback: label all non-padding tokens for this sample
                 if "attention_mask" in enc:
                     mask = enc["attention_mask"][row] == 1
                     labels[row, mask] = enc["input_ids"][row, mask]
                 else:
-                    pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
-                    mask = enc["input_ids"][row] != pad_token_id
+                    pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+                    mask = enc["input_ids"][row] != pad_id
                     labels[row, mask] = enc["input_ids"][row, mask]
         
         return enc, labels
@@ -596,7 +569,7 @@ class Experiment1_KillSwitch:
         canaries: List[str],
         num_epochs: int = 40,  # OPTIMIZED: Reduced from 200 to 40 (5x faster, sufficient for 20 canaries)
         learning_rate: float = 1e-3,  # CRITICAL: Must be 1e-3 for memorization (was 8e-5, too low!)
-        target_loss: float = 0.05,  # FIXED: More realistic target (0.01 is too aggressive for LLaMA)
+        target_loss: float = 0.01,  # CRITICAL: Stricter target (0.01) to prevent first-epoch false stop
     ):
         """
         Fine-tune model on canaries using LoRA/PEFT to memorize them.
@@ -876,9 +849,11 @@ class Experiment1_KillSwitch:
                 print(f"    Epoch {epoch + 1}/{num_epochs} [{stage_info}], Loss: {current_loss:.4f} (min={loss_min:.4f}, median={loss_median:.4f}, max={loss_max:.4f})")
                 print(f"      LR: {optimizer.param_groups[0]['lr']:.2e}, Repeats: {current_repeats}, LoRA grad: {lora_grad:.4e} ({lora_count} params)")
             
-            # Early stopping if loss is low enough for verbatim memorization
-            if current_loss < target_loss:
-                print(f"  ✓ Early stopping: Loss {current_loss:.4f} < target {target_loss}")
+            # Early stopping: must run at least min_epochs before allowing early stop
+            # This prevents false stop on first epoch and ensures sufficient exposure
+            min_epochs = 10  # Minimum epochs before early stopping allowed
+            if (epoch + 1) >= min_epochs and current_loss <= target_loss:
+                print(f"  ✓ Early stopping: Loss {current_loss:.4f} <= target {target_loss} (after {epoch + 1} epochs)")
                 break
             
             # Track best loss
@@ -909,14 +884,22 @@ class Experiment1_KillSwitch:
         self.canaries = canaries
         print(f"  Training complete. LoRA merged. Stored {len(canaries)} canaries for evaluation.")
     
-    def extract_canary(self, prefix: str, max_new_tokens: int = 30) -> str:
+    def extract_canary(self, prefix: str, max_new_tokens: int = 80) -> str:
         """
         Extract canary from model using fixed prefix.
         
-        CRITICAL: Uses fixed prefix for stable extraction matching.
-        Returns generated text for strict value matching.
+        CRITICAL: 
+        - Uses fixed prefix for stable extraction matching (must match training prefix exactly)
+        - Uses deterministic greedy decoding (do_sample=False, temperature=0.0)
+        - Increased max_new_tokens to 80 to ensure complete value appears in generation
         """
-        return self.libortho.generate(prefix, max_new_tokens=max_new_tokens)
+        return self.libortho.generate(
+            prefix,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,      # Deterministic greedy
+            temperature=0.0,      # No randomness
+            top_p=1.0,            # No nucleus sampling
+        )
     
     def run(
         self,
