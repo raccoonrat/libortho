@@ -482,7 +482,8 @@ class Experiment1_KillSwitch:
         ).to(self.device)
         
         # Initialize labels with -100 (ignore index)
-        labels = torch.full_like(enc["input_ids"], -100)
+        # CRITICAL: Ensure labels are on the same device as input_ids
+        labels = torch.full_like(enc["input_ids"], -100).to(self.device)
         valid_labels_count = 0
         
         for row, it in enumerate(items):
@@ -779,7 +780,7 @@ class Experiment1_KillSwitch:
                 # Extract batch with pre-computed value-span labels
                 batch_input_ids = tokenized["input_ids"][start_idx:end_idx]
                 batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx] if "attention_mask" in tokenized else None
-                batch_labels = current_labels[start_idx:end_idx]  # Use pre-computed labels (only value tokens, rest = -100)
+                batch_labels = current_labels[start_idx:end_idx].to(self.device)  # Use pre-computed labels, ensure on device
                 
                 # Ensure padding is also masked (in case attention_mask exists)
                 if batch_attention_mask is not None:
