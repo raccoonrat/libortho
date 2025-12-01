@@ -32,5 +32,5 @@ install-debug-verbose = "bash -c 'export LIBORTHO_DEBUG=1 && export LIBORTHO_VER
 install-verbose = "bash -c 'export LIBORTHO_VERBOSE=1 && pip install -e . -vv'"
 
 [requires]
-python_version = "3.8"
+python_version = "3.12"
 

@@ -10,6 +10,28 @@
 pip install pipenv
 ```
 
+### 初始化 Pipenv 环境（首次使用或指定 Python 版本）
+
+```bash
+# 使用默认 Python 版本（Pipfile 中指定的版本）
+pipenv install
+
+# 指定 Python 版本（例如 Python 3.12）
+pipenv install --python 3.12
+
+# 或者使用 python 可执行文件路径
+pipenv install --python /usr/bin/python3.12
+
+# 如果已经存在虚拟环境，需要先删除再重新创建
+pipenv --rm
+pipenv install --python 3.12
+```
+
+**注意**: 如果遇到 "Python 3.x was not found" 错误：
+- 确保系统已安装对应版本的 Python
+- 可以使用 `python3 --version` 检查可用版本
+- 或者使用 `pipenv install --python $(which python3)` 使用系统默认 Python3
+
 ### 使用 Pipfile 中的脚本命令
 
 项目已配置了 Pipfile，包含以下便捷脚本：
@@ -27,6 +49,8 @@ pipenv run install-debug-verbose
 # 仅详细输出模式（不改变编译选项）
 pipenv run install-verbose
 ```
+
+**注意**: `pipenv run` 脚本命令不支持传递 `--python` 参数。如果需要指定 Python 版本，请先使用 `pipenv install --python 3.12` 初始化环境。
 
 ### 使用环境变量（pipenv 会自动加载 .env 文件）
 
@@ -212,6 +236,34 @@ cuda-gdb python
 
 ## 常见问题排查
 
+### 0. Pipenv Python 版本问题
+
+**问题**: `Warning: Python 3.x was not found on your system...`
+
+**解决方案**:
+
+```bash
+# 方法 1: 检查系统可用的 Python 版本
+python3 --version
+which python3
+
+# 方法 2: 使用系统默认 Python3 初始化 pipenv
+pipenv install --python $(which python3)
+
+# 方法 3: 如果已有虚拟环境，删除后重新创建
+pipenv --rm
+pipenv install --python 3.12
+
+# 方法 4: 手动指定 Python 路径
+pipenv install --python /usr/bin/python3.12
+
+# 方法 5: 如果使用 pyenv，确保已安装对应版本
+pyenv install 3.12.0
+pipenv install --python 3.12
+```
+
+**注意**: `pipenv run` 脚本命令不支持 `--python` 参数。必须先使用 `pipenv install --python <version>` 初始化环境。
+
 ### 1. 编译卡住或很慢
 
 ```bash
@@ -266,8 +318,11 @@ cat build_debug.log | grep -i warning
 ### 使用 pipenv（推荐）
 
 ```bash
-# 1. 初始化 pipenv（如果还没有）
-pipenv install
+# 1. 初始化 pipenv（如果还没有，指定 Python 版本）
+pipenv install --python 3.12
+
+# 或者使用系统默认 Python3
+pipenv install --python $(which python3)
 
 # 2. 清理之前的构建
 rm -rf build/ *.egg-info/
