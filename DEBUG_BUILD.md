@@ -1,8 +1,91 @@
 # 编译调试指南 (Debug Build Guide)
 
-本指南说明如何在 `pip install -e .` 编译时进行调试。
+本指南说明如何在 `pip install -e .` 或 `pipenv install` 编译时进行调试。
 
-## 方法 1: 使用环境变量启用调试模式
+## 方法 0: 使用 Pipenv 进行调试（推荐）
+
+### 安装 Pipenv（如果还没有）
+
+```bash
+pip install pipenv
+```
+
+### 使用 Pipfile 中的脚本命令
+
+项目已配置了 Pipfile，包含以下便捷脚本：
+
+```bash
+# 正常安装
+pipenv run install
+
+# 调试模式安装（包含调试符号，无优化）
+pipenv run install-debug
+
+# 详细调试模式安装（调试符号 + 详细输出）
+pipenv run install-debug-verbose
+
+# 仅详细输出模式（不改变编译选项）
+pipenv run install-verbose
+```
+
+### 使用环境变量（pipenv 会自动加载 .env 文件）
+
+#### 方法 A: 创建 .env 文件
+
+```bash
+# 创建 .env 文件
+cat > .env << EOF
+LIBORTHO_DEBUG=1
+LIBORTHO_VERBOSE=1
+EOF
+
+# 然后正常安装（pipenv 会自动加载 .env）
+pipenv install -e .
+```
+
+#### 方法 B: 在命令行中设置环境变量
+
+```bash
+# 调试模式安装
+LIBORTHO_DEBUG=1 pipenv install -e .
+
+# 详细调试模式安装
+LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv install -e . -v
+```
+
+#### 方法 C: 使用 pipenv run 传递环境变量
+
+```bash
+# 调试模式
+pipenv run env LIBORTHO_DEBUG=1 pip install -e .
+
+# 详细调试模式
+pipenv run env LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pip install -e . -vv
+```
+
+### 保存编译日志（pipenv）
+
+```bash
+# 使用调试模式并保存日志
+LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv install -e . -v 2>&1 | tee build_debug.log
+
+# 或者使用脚本命令
+pipenv run install-debug-verbose 2>&1 | tee build_debug.log
+```
+
+### 清理并重新安装（pipenv）
+
+```bash
+# 清理构建文件
+rm -rf build/ *.egg-info/
+find . -name "*.so" -delete
+find . -name "*.o" -delete
+
+# 使用调试模式重新安装
+LIBORTHO_DEBUG=1 pipenv install -e . --dev
+```
+
+## 方法 1: 使用环境变量启用调试模式（直接使用 pip）
 
 ### 启用调试构建（包含调试符号，无优化）
 
@@ -160,6 +243,8 @@ pip install -e . --force-reinstall --no-cache-dir
 
 ## 完整调试示例
 
+### 使用 pip（直接安装）
+
 ```bash
 # 1. 清理之前的构建
 rm -rf build/ *.egg-info/
@@ -178,12 +263,43 @@ cat build_debug.log | grep -i error
 cat build_debug.log | grep -i warning
 ```
 
+### 使用 pipenv（推荐）
+
+```bash
+# 1. 初始化 pipenv（如果还没有）
+pipenv install
+
+# 2. 清理之前的构建
+rm -rf build/ *.egg-info/
+find . -name "*.so" -delete
+find . -name "*.o" -delete
+
+# 3. 使用调试脚本安装并保存日志
+pipenv run install-debug-verbose 2>&1 | tee build_debug.log
+
+# 或者使用环境变量
+LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv install -e . -vv 2>&1 | tee build_debug.log
+
+# 4. 检查日志文件
+cat build_debug.log | grep -i error
+cat build_debug.log | grep -i warning
+```
+
 ## 环境变量总结
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|--------|
 | `LIBORTHO_DEBUG` | 启用调试构建（包含调试符号，无优化） | `0` |
 | `LIBORTHO_VERBOSE` | 启用详细输出（显示编译参数等） | `0` |
+
+## Pipenv 脚本命令总结
+
+| 命令 | 说明 |
+|------|------|
+| `pipenv run install` | 正常安装（发布模式） |
+| `pipenv run install-debug` | 调试模式安装（`LIBORTHO_DEBUG=1`） |
+| `pipenv run install-debug-verbose` | 调试模式 + 详细输出 |
+| `pipenv run install-verbose` | 仅详细输出（不改变编译选项） |
 
 ## 注意事项
 

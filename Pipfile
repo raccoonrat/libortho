@@ -1,0 +1,36 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+torch = ">=1.12.0"
+numpy = ">=1.20.0"
+pybind11 = ">=2.10.0"
+matplotlib = ">=3.5.0"
+seaborn = ">=0.12.0"
+transformers = ">=4.30.0"
+datasets = ">=2.10.0"
+accelerate = ">=0.20.0"
+bitsandbytes = ">=0.39.0"
+peft = ">=0.5.0"
+# libortho 通过 pipenv install -e . 安装，不需要在这里声明
+
+[dev-packages]
+pytest = ">=7.0.0"
+black = ">=22.0.0"
+ruff = ">=0.1.0"
+
+[scripts]
+# 正常安装
+install = "pip install -e ."
+# 调试模式安装（包含调试符号，无优化）
+install-debug = "bash -c 'export LIBORTHO_DEBUG=1 && pip install -e .'"
+# 详细调试模式安装（调试符号 + 详细输出）
+install-debug-verbose = "bash -c 'export LIBORTHO_DEBUG=1 && export LIBORTHO_VERBOSE=1 && pip install -e . -vv'"
+# 仅详细输出模式（不改变编译选项）
+install-verbose = "bash -c 'export LIBORTHO_VERBOSE=1 && pip install -e . -vv'"
+
+[requires]
+python_version = "3.8"
+
