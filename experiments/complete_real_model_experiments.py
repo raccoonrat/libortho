@@ -479,7 +479,11 @@ class Experiment1_KillSwitch:
             padding=True,
             truncation=True,
             max_length=max_length,
-        ).to(self.device)
+        )
+        
+        # CRITICAL: Move all tensors to the correct device individually
+        # Calling .to() on a dict might not work correctly for all nested tensors
+        enc = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in enc.items()}
         
         # Initialize labels with -100 (ignore index)
         # CRITICAL: Ensure labels are on the same device as input_ids
@@ -778,8 +782,9 @@ class Experiment1_KillSwitch:
                 end_idx = min(start_idx + batch_size, num_samples)
                 
                 # Extract batch with pre-computed value-span labels
-                batch_input_ids = tokenized["input_ids"][start_idx:end_idx]
-                batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx] if "attention_mask" in tokenized else None
+                # CRITICAL: Ensure all tensors are on the correct device
+                batch_input_ids = tokenized["input_ids"][start_idx:end_idx].to(self.device)
+                batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx].to(self.device) if "attention_mask" in tokenized else None
                 batch_labels = current_labels[start_idx:end_idx].to(self.device)  # Use pre-computed labels, ensure on device
                 
                 # Ensure padding is also masked (in case attention_mask exists)
