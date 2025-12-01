@@ -1,90 +1,65 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-*.dylib
-*.dll
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
 *.egg
-MANIFEST
+*.egg-info/
+dist/
+build/
+.Python
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-.pytest_cache/
-
-# Environments
-.env
-.venv
-env/
+# Pipenv
+Pipfile.lock
+.venv/
 venv/
 ENV/
-env.bak/
-venv.bak/
+env/
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Environment
+.env
+.env.local
+
+# Package files
+libortho_env_*.tar.gz
+libortho_env_*/
+libortho_restored/
+*.tar.gz
+
 # CUDA
+*.o
 *.ptx
 *.cubin
 
-# Build artifacts
-*.o
-*.a
-*.obj
-
-# Python
-*.pyc
-__pycache__/
-
-# Jupyter
-.ipynb_checkpoints/
+# Logs
+*.log
+build.log
+build_debug.log
+rebuild.log
+rebuild_error.log
 
 # OS
 .DS_Store
 Thumbs.db
 
-
-# Execute binary
-tests/test_cuda_kernel
-tests/test_tensor_core
-tests/test_cpu_forward
-tests/benchmark_null_test
-
-Pipfile.lock
+# Temporary files
+*.tmp
+*.bak
+*.swp

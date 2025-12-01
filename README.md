@@ -104,6 +104,66 @@ pip install -e .
 
 **注意**: CUDA 支持需要 WSL 中安装 CUDA Toolkit 或 Windows 中安装 CUDA。
 
+### 使用 Pipenv（推荐）
+
+```bash
+# 初始化环境
+pipenv install --python 3.12
+
+# 安装项目
+pipenv run install
+
+# 重新编译
+pipenv run rebuild
+```
+
+更多编译选项请参考 [DEBUG_BUILD.md](DEBUG_BUILD.md)
+
+## 环境打包和移植
+
+### 打包环境
+
+将编译好的环境打包，用于移植到其他机器：
+
+```bash
+# 使用 Pipfile 脚本（推荐）
+pipenv run package
+
+# 或直接运行脚本
+chmod +x package_environment.sh
+./package_environment.sh
+```
+
+### 移植到目标机器
+
+```bash
+# 1. 解压
+tar -xzf libortho_env_*.tar.gz
+cd libortho_env_*
+
+# 2. 运行恢复脚本
+bash restore_environment.sh
+
+# 3. 验证
+cd ../libortho_restored
+python3 -c "import libortho._C_ops; print('✅ 导入成功')"
+```
+
+⚠️ **兼容性要求**:
+- Python 版本应该相同或兼容
+- CUDA 版本应该相同或更高（如果使用 CUDA）
+- GPU 架构需要支持编译时的架构
+
+如果遇到兼容性问题，在目标机器上重新编译：
+```bash
+cd libortho_restored
+pipenv run rebuild
+```
+
+详细说明请参考：
+- [PACKAGE_QUICK_REF.md](PACKAGE_QUICK_REF.md) - 打包快速参考
+- [PORTING_GUIDE.md](PORTING_GUIDE.md) - 完整移植指南
+
 ## 测试
 
 ### 运行所有测试

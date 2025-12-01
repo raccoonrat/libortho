@@ -38,6 +38,8 @@ rebuild = "bash -c 'pipenv run clean && pip install -e . --force-reinstall --no-
 rebuild-debug = "bash -c 'pipenv run clean && export LIBORTHO_DEBUG=1 && pip install -e . --force-reinstall --no-cache-dir'"
 # 清理并重新安装（详细调试模式）
 rebuild-debug-verbose = "bash -c 'pipenv run clean && export LIBORTHO_DEBUG=1 && export LIBORTHO_VERBOSE=1 && pip install -e . --force-reinstall --no-cache-dir -vv'"
+# 打包环境（用于移植到其他机器）
+package = "bash -c 'chmod +x package_environment.sh && ./package_environment.sh'"
 
 [requires]
 python_version = "3.12"

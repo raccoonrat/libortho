@@ -84,6 +84,8 @@ pipenv run rebuild
 
 ## 所有可用命令
 
+### 编译相关
+
 | 命令 | 说明 |
 |------|------|
 | `pipenv run clean` | 清理所有构建文件 |
@@ -94,5 +96,14 @@ pipenv run rebuild
 | `pipenv run rebuild-debug` | 清理 + 重新安装（调试模式） |
 | `pipenv run rebuild-debug-verbose` | 清理 + 重新安装（详细调试模式） |
 
-详细说明请参考 [DEBUG_BUILD.md](DEBUG_BUILD.md)
+### 打包相关
+
+| 命令 | 说明 |
+|------|------|
+| `pipenv run package` | 打包环境（用于移植到其他机器） |
+
+详细说明请参考：
+- [DEBUG_BUILD.md](DEBUG_BUILD.md) - 编译调试指南
+- [PACKAGE_QUICK_REF.md](PACKAGE_QUICK_REF.md) - 打包快速参考
+- [PORTING_GUIDE.md](PORTING_GUIDE.md) - 完整移植指南
 
