@@ -5,10 +5,20 @@ libortho - Setup Configuration
 from setuptools import setup
 from pybind11 import get_cmake_dir
 import pybind11
+import os
 
 # Check if CUDA is available
 import subprocess
 import sys
+
+# Debug mode: Set LIBORTHO_DEBUG=1 to enable debug builds
+DEBUG_MODE = os.environ.get('LIBORTHO_DEBUG', '0') == '1'
+VERBOSE_MODE = os.environ.get('LIBORTHO_VERBOSE', '0') == '1'
+
+if DEBUG_MODE:
+    print("=" * 60)
+    print("DEBUG MODE ENABLED")
+    print("=" * 60)
 
 def check_cuda():
     try:
@@ -38,13 +48,20 @@ def get_cuda_archs():
             if version_match:
                 major = int(version_match.group(1))
                 minor = int(version_match.group(2))
+                if VERBOSE_MODE or DEBUG_MODE:
+                    print(f"[DEBUG] CUDA version detected: {major}.{minor}")
                 if major > 12 or (major == 12 and minor >= 8):
                     base_archs.append('-arch=sm_100')  # Blackwell (RTX 5060)
                     print(f"CUDA {major}.{minor} detected: Including sm_100 (Blackwell) support")
                 else:
                     print(f"CUDA {major}.{minor} detected: sm_100 not supported (requires CUDA 12.8+)")
-    except:
+    except Exception as e:
+        if VERBOSE_MODE or DEBUG_MODE:
+            print(f"[DEBUG] Failed to detect CUDA version: {e}")
         pass  # If version detection fails, just use base architectures
+    
+    if VERBOSE_MODE or DEBUG_MODE:
+        print(f"[DEBUG] CUDA architectures: {base_archs}")
     
     return base_archs
 
@@ -59,12 +76,38 @@ if HAS_CUDA:
         from torch.utils.cpp_extension import CUDAExtension, BuildExtension
         
         cuda_archs = get_cuda_archs()
-        nvcc_flags = [
-            '-O3', 
-            '--use_fast_math',
-        ] + cuda_archs + [
-            '--expt-relaxed-constexpr'  # For WMMA API
-        ]
+        
+        # Debug vs Release build flags
+        if DEBUG_MODE:
+            # Debug flags: include debug symbols, disable optimizations
+            nvcc_flags = [
+                '-g',                    # Debug symbols
+                '-G',                    # Device debug symbols
+                '-O0',                   # No optimization
+                '--ptxas-options=-v',    # Verbose PTX assembly
+                '--compiler-options=-fPIC',
+            ] + cuda_archs + [
+                '--expt-relaxed-constexpr',  # For WMMA API
+                '-lineinfo',             # Line number information
+            ]
+            cxx_flags = ['-g', '-O0', '-std=c++17', '-fPIC']
+            if VERBOSE_MODE:
+                print("[DEBUG] Using DEBUG build flags (no optimization, with debug symbols)")
+        else:
+            # Release flags: optimized
+            nvcc_flags = [
+                '-O3', 
+                '--use_fast_math',
+            ] + cuda_archs + [
+                '--expt-relaxed-constexpr'  # For WMMA API
+            ]
+            cxx_flags = ['-O3', '-std=c++17']
+            if VERBOSE_MODE:
+                print("[DEBUG] Using RELEASE build flags (optimized)")
+        
+        if VERBOSE_MODE or DEBUG_MODE:
+            print(f"[DEBUG] NVCC flags: {nvcc_flags}")
+            print(f"[DEBUG] CXX flags: {cxx_flags}")
         
         ext_modules.append(
             CUDAExtension(
@@ -79,7 +122,7 @@ if HAS_CUDA:
                     pybind11.get_include(),
                 ],
                 extra_compile_args={
-                    'cxx': ['-O3', '-std=c++17'],
+                    'cxx': cxx_flags,
                     'nvcc': nvcc_flags
                 },
                 libraries=['cublas'],
@@ -93,12 +136,25 @@ if HAS_CUDA:
         from pybind11.setup_helpers import build_ext as pybind11_build_ext
         
         cuda_archs = get_cuda_archs()
-        nvcc_flags = [
-            '-O3', 
-            '--use_fast_math',
-        ] + cuda_archs + [
-            '--expt-relaxed-constexpr'
-        ]
+        
+        # Debug vs Release build flags
+        if DEBUG_MODE:
+            nvcc_flags = [
+                '-g', '-G', '-O0',
+                '--ptxas-options=-v',
+            ] + cuda_archs + [
+                '--expt-relaxed-constexpr',
+                '-lineinfo',
+            ]
+            cxx_flags = ['-g', '-O0', '-std=c++17', '-fPIC']
+        else:
+            nvcc_flags = [
+                '-O3', 
+                '--use_fast_math',
+            ] + cuda_archs + [
+                '--expt-relaxed-constexpr'
+            ]
+            cxx_flags = ['-O3', '-std=c++17']
         
         # Note: Standard Extension doesn't handle .cu files well
         # This is a fallback that may not work
@@ -114,7 +170,7 @@ if HAS_CUDA:
                 ],
                 language='c++',
                 extra_compile_args={
-                    'cxx': ['-O3', '-std=c++17'],
+                    'cxx': cxx_flags,
                 },
                 define_macros=[('VERSION_INFO', '"dev"')],
             )
