@@ -30,6 +30,14 @@ install-debug = "bash -c 'export LIBORTHO_DEBUG=1 && pip install -e .'"
 install-debug-verbose = "bash -c 'export LIBORTHO_DEBUG=1 && export LIBORTHO_VERBOSE=1 && pip install -e . -vv'"
 # 仅详细输出模式（不改变编译选项）
 install-verbose = "bash -c 'export LIBORTHO_VERBOSE=1 && pip install -e . -vv'"
+# 清理构建文件
+clean = "bash -c 'rm -rf build/ dist/ *.egg-info/ libortho.egg-info/ && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && find . -type f -name \"*.pyc\" -delete 2>/dev/null || true && find . -type f -name \"*.pyo\" -delete 2>/dev/null || true && find . -type f -name \"*.o\" -delete 2>/dev/null || true && find . -type f -name \"*.so\" -delete 2>/dev/null || true && echo \"✅ Clean complete!\"'"
+# 清理并重新安装（正常模式）
+rebuild = "bash -c 'pipenv run clean && pip install -e . --force-reinstall --no-cache-dir'"
+# 清理并重新安装（调试模式）
+rebuild-debug = "bash -c 'pipenv run clean && export LIBORTHO_DEBUG=1 && pip install -e . --force-reinstall --no-cache-dir'"
+# 清理并重新安装（详细调试模式）
+rebuild-debug-verbose = "bash -c 'pipenv run clean && export LIBORTHO_DEBUG=1 && export LIBORTHO_VERBOSE=1 && pip install -e . --force-reinstall --no-cache-dir -vv'"
 
 [requires]
 python_version = "3.12"

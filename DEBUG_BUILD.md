@@ -109,6 +109,165 @@ find . -name "*.o" -delete
 LIBORTHO_DEBUG=1 pipenv install -e . --dev
 ```
 
+## 重新编译项目（Pipenv 环境）
+
+在 pipenv 环境中，有多种方式可以重新编译项目：
+
+### 方法 1: 使用 Pipfile 脚本命令（最简单，推荐）
+
+项目已在 Pipfile 中配置了便捷的重新编译脚本：
+
+```bash
+# 清理构建文件
+pipenv run clean
+
+# 清理并重新安装（正常模式）
+pipenv run rebuild
+
+# 清理并重新安装（调试模式）
+pipenv run rebuild-debug
+
+# 清理并重新安装（详细调试模式，推荐用于调试）
+pipenv run rebuild-debug-verbose
+```
+
+### 方法 2: 手动清理后重新安装
+
+```bash
+# 步骤 1: 清理构建文件
+pipenv run clean
+
+# 或者使用项目提供的清理脚本
+bash clean_build.sh
+
+# 步骤 2: 重新安装（正常模式）
+pipenv install -e . --force-reinstall --no-cache-dir
+
+# 或者使用调试模式
+LIBORTHO_DEBUG=1 pipenv install -e . --force-reinstall --no-cache-dir
+
+# 或者使用详细调试模式
+LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv install -e . --force-reinstall --no-cache-dir -vv
+```
+
+### 方法 3: 使用 pip 命令（在 pipenv shell 中）
+
+```bash
+# 进入 pipenv shell
+pipenv shell
+
+# 清理构建文件
+pipenv run clean
+
+# 重新安装（正常模式）
+pip install -e . --force-reinstall --no-cache-dir
+
+# 重新安装（调试模式）
+export LIBORTHO_DEBUG=1
+pip install -e . --force-reinstall --no-cache-dir
+
+# 退出 shell
+exit
+```
+
+### 方法 4: 使用环境变量 + 脚本命令
+
+```bash
+# 清理
+pipenv run clean
+
+# 使用环境变量重新编译（正常模式）
+pipenv run install
+
+# 使用环境变量重新编译（调试模式）
+LIBORTHO_DEBUG=1 pipenv run install
+
+# 使用环境变量重新编译（详细调试模式）
+LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv run install-verbose
+```
+
+### 方法 5: 完整清理和重新编译流程（推荐用于调试）
+
+```bash
+# 1. 清理所有构建文件
+pipenv run clean
+
+# 2. 使用详细调试模式重新编译并保存日志
+pipenv run rebuild-debug-verbose 2>&1 | tee rebuild.log
+
+# 3. 检查编译日志
+cat rebuild.log | grep -i error
+cat rebuild.log | grep -i warning
+cat rebuild.log | tail -50  # 查看最后50行
+```
+
+### 重新编译的常见场景
+
+#### 场景 1: 修改了源代码后重新编译
+
+```bash
+# 最简单的方式
+pipenv run rebuild
+```
+
+#### 场景 2: 需要调试时重新编译（包含调试符号）
+
+```bash
+# 使用调试模式重新编译
+pipenv run rebuild-debug
+```
+
+#### 场景 3: 编译出错，需要查看详细日志
+
+```bash
+# 清理并详细重新编译
+pipenv run rebuild-debug-verbose 2>&1 | tee rebuild_error.log
+cat rebuild_error.log | grep -i error
+```
+
+#### 场景 4: 切换编译模式（从调试模式切换到发布模式）
+
+```bash
+# 清理
+pipenv run clean
+
+# 重新编译为发布模式（不设置 LIBORTHO_DEBUG）
+pipenv install -e . --force-reinstall --no-cache-dir
+```
+
+#### 场景 5: 完全清理并重新开始
+
+```bash
+# 清理构建文件
+pipenv run clean
+
+# 清理 pip 缓存
+pipenv run pip cache purge
+
+# 重新安装所有依赖
+pipenv install --dev
+
+# 重新编译项目
+pipenv run rebuild
+```
+
+### 重新编译脚本说明
+
+| 脚本命令 | 说明 |
+|---------|------|
+| `pipenv run clean` | 清理所有构建文件（build/, *.egg-info/, *.so, *.o 等） |
+| `pipenv run rebuild` | 清理 + 重新安装（正常模式，发布版本） |
+| `pipenv run rebuild-debug` | 清理 + 重新安装（调试模式，包含调试符号） |
+| `pipenv run rebuild-debug-verbose` | 清理 + 重新安装（调试模式 + 详细输出） |
+
+### 注意事项
+
+1. **`--force-reinstall`**: 强制重新安装，即使包已经安装
+2. **`--no-cache-dir`**: 不使用缓存，确保完全重新编译
+3. **清理很重要**: 修改源代码后，建议先清理再重新编译，避免使用旧的编译文件
+4. **调试模式**: 调试模式会显著增加编译时间和文件大小，仅用于调试
+5. **保存日志**: 遇到编译问题时，建议保存编译日志以便排查
+
 ## 方法 1: 使用环境变量启用调试模式（直接使用 pip）
 
 ### 启用调试构建（包含调试符号，无优化）
@@ -324,20 +483,20 @@ pipenv install --python 3.12
 # 或者使用系统默认 Python3
 pipenv install --python $(which python3)
 
-# 2. 清理之前的构建
-rm -rf build/ *.egg-info/
-find . -name "*.so" -delete
-find . -name "*.o" -delete
+# 2. 使用重建脚本（自动清理并重新编译，推荐）
+pipenv run rebuild-debug-verbose 2>&1 | tee build_debug.log
 
-# 3. 使用调试脚本安装并保存日志
+# 或者分步执行
+pipenv run clean
 pipenv run install-debug-verbose 2>&1 | tee build_debug.log
 
 # 或者使用环境变量
-LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv install -e . -vv 2>&1 | tee build_debug.log
+LIBORTHO_DEBUG=1 LIBORTHO_VERBOSE=1 pipenv install -e . --force-reinstall --no-cache-dir -vv 2>&1 | tee build_debug.log
 
-# 4. 检查日志文件
+# 3. 检查日志文件
 cat build_debug.log | grep -i error
 cat build_debug.log | grep -i warning
+cat build_debug.log | tail -50  # 查看最后50行
 ```
 
 ## 环境变量总结
@@ -349,12 +508,41 @@ cat build_debug.log | grep -i warning
 
 ## Pipenv 脚本命令总结
 
+### 安装命令
+
 | 命令 | 说明 |
 |------|------|
 | `pipenv run install` | 正常安装（发布模式） |
 | `pipenv run install-debug` | 调试模式安装（`LIBORTHO_DEBUG=1`） |
 | `pipenv run install-debug-verbose` | 调试模式 + 详细输出 |
 | `pipenv run install-verbose` | 仅详细输出（不改变编译选项） |
+
+### 清理和重新编译命令
+
+| 命令 | 说明 |
+|------|------|
+| `pipenv run clean` | 清理所有构建文件（build/, *.egg-info/, *.so, *.o 等） |
+| `pipenv run rebuild` | 清理 + 重新安装（正常模式，发布版本） |
+| `pipenv run rebuild-debug` | 清理 + 重新安装（调试模式，包含调试符号） |
+| `pipenv run rebuild-debug-verbose` | 清理 + 重新安装（调试模式 + 详细输出） |
+
+### 快速参考
+
+**首次安装**:
+```bash
+pipenv install --python 3.12
+pipenv run install
+```
+
+**修改代码后重新编译**:
+```bash
+pipenv run rebuild
+```
+
+**调试时重新编译**:
+```bash
+pipenv run rebuild-debug-verbose
+```
 
 ## 注意事项
 
