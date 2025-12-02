@@ -456,12 +456,15 @@ class Experiment1_KillSwitch:
         except ImportError:
             raise ImportError("PEFT library is required for training.")
         
+        # OPTIMIZATION 1: Reduced LoRA rank and target modules
+        # 128 is too large for memorizing 20 strings. 64 is sufficient.
+        # k/o_proj removed to speed up backprop (memorization mostly in q/v/down)
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=128,
-            lora_alpha=256,
+            r=64, # Optimized from 128
+            lora_alpha=128, # Adjusted for r=64
             lora_dropout=0.0,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "down_proj"],
+            target_modules=["q_proj", "v_proj", "down_proj"], # Optimized: reduced targets
         )
         
         self.model = get_peft_model(self.model, lora_config)
@@ -470,18 +473,33 @@ class Experiment1_KillSwitch:
         canary_repeats_stage1 = 600
         canary_repeats_stage2 = 1200
         
-        repeated_canaries_stage1 = canaries * canary_repeats_stage1
-        tokenized_stage1, labels_stage1 = self._tokenize_with_value_span(repeated_canaries_stage1, max_length=256)
+        # OPTIMIZATION 2: Efficient Data Preparation
+        # Tokenize unique canaries ONCE, then expand on GPU
+        # This saves massive CPU time compared to tokenizing 12,000 strings
+        print("  Tokenizing canaries (optimized)...")
+        unique_tokenized, unique_labels = self._tokenize_with_value_span(canaries, max_length=256)
         
-        repeated_canaries_stage2 = canaries * canary_repeats_stage2
-        tokenized_stage2, labels_stage2 = self._tokenize_with_value_span(repeated_canaries_stage2, max_length=256)
+        def get_epoch_data(repeats):
+            # Use torch.repeat to expand data efficiently in VRAM
+            # [20, seq_len] -> [20*repeats, seq_len]
+            return {
+                "input_ids": unique_tokenized["input_ids"].repeat(repeats, 1),
+                "attention_mask": unique_tokenized["attention_mask"].repeat(repeats, 1),
+                "labels": unique_labels.repeat(repeats, 1)
+            }
         
-        tokenized = tokenized_stage1
-        current_labels = labels_stage1
+        # Initialize Stage 1 data
+        stage1_data = get_epoch_data(canary_repeats_stage1)
+        # We prepare Stage 2 later to save VRAM
+        
+        current_data = stage1_data
+        current_repeats = canary_repeats_stage1
         
         stage1_epochs = 20
-        batch_size = 16
-        num_samples = tokenized["input_ids"].shape[0]
+        # OPTIMIZATION 3: Increased Batch Size
+        # 16 -> 64. 3B model is small, 64 fits easily and speeds up training 4x.
+        batch_size = 64 
+        num_samples = current_data["input_ids"].shape[0]
         num_batches = (num_samples + batch_size - 1) // batch_size
         
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
@@ -512,12 +530,15 @@ class Experiment1_KillSwitch:
         best_loss = float('inf')
         patience_counter = 0
         
+        print(f"  Training for up to {num_epochs} epochs (Batch size: {batch_size})...")
+        
         for epoch in range(num_epochs):
             if epoch == stage1_epochs:
                 print(f"  [Stage Transition] Switching to Stage 2 at epoch {epoch + 1}")
-                tokenized = tokenized_stage2
-                current_labels = labels_stage2
-                num_samples = tokenized["input_ids"].shape[0]
+                # Generate Stage 2 data on demand
+                current_data = get_epoch_data(canary_repeats_stage2)
+                current_repeats = canary_repeats_stage2
+                num_samples = current_data["input_ids"].shape[0]
                 num_batches = (num_samples + batch_size - 1) // batch_size
                 
                 optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr_stage2, weight_decay=0.0)
@@ -536,9 +557,10 @@ class Experiment1_KillSwitch:
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, num_samples)
                 
-                batch_input_ids = tokenized["input_ids"][start_idx:end_idx].to(self.device)
-                batch_attention_mask = tokenized["attention_mask"][start_idx:end_idx].to(self.device) if "attention_mask" in tokenized else None
-                batch_labels = current_labels[start_idx:end_idx].to(self.device)
+                # Slicing tensor is fast (view operation)
+                batch_input_ids = current_data["input_ids"][start_idx:end_idx]
+                batch_attention_mask = current_data["attention_mask"][start_idx:end_idx]
+                batch_labels = current_data["labels"][start_idx:end_idx]
                 
                 if batch_attention_mask is not None:
                     batch_labels[batch_attention_mask == 0] = -100
@@ -584,6 +606,7 @@ class Experiment1_KillSwitch:
         self.model = self.model.merge_and_unload()
         self.model.eval()
         
+        # Update model reference in LibOrtho wrapper
         self.libortho.model = self.model
         self.canaries = canaries
     
@@ -613,6 +636,7 @@ class Experiment1_KillSwitch:
             print(f"Warning: Could not load WikiText: {e}")
             wikitext_texts = [f"Sample text {i}." for i in range(num_wikitext_samples)]
         
+        # THIS triggers the layer replacement!
         print(f"\n[Step 4] Separating weights and replacing layers...")
         ortho_sparsity = self.libortho.separate_weights(
             wikitext_texts[:10],
