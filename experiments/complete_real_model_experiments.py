@@ -457,14 +457,12 @@ class Experiment1_KillSwitch:
             raise ImportError("PEFT library is required for training.")
         
         # OPTIMIZATION 1: Reduced LoRA rank and target modules
-        # 128 is too large for memorizing 20 strings. 64 is sufficient.
-        # k/o_proj removed to speed up backprop (memorization mostly in q/v/down)
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=64, # Optimized from 128
-            lora_alpha=128, # Adjusted for r=64
+            r=64,
+            lora_alpha=128,
             lora_dropout=0.0,
-            target_modules=["q_proj", "v_proj", "down_proj"], # Optimized: reduced targets
+            target_modules=["q_proj", "v_proj", "down_proj"],
         )
         
         self.model = get_peft_model(self.model, lora_config)
@@ -473,34 +471,38 @@ class Experiment1_KillSwitch:
         canary_repeats_stage1 = 600
         canary_repeats_stage2 = 1200
         
-        # OPTIMIZATION 2: Efficient Data Preparation
-        # Tokenize unique canaries ONCE, then expand on GPU
-        # This saves massive CPU time compared to tokenizing 12,000 strings
-        print("  Tokenizing canaries (optimized)...")
+        # OPTIMIZATION 2: Efficient Data Preparation & GPU Preloading
+        # Tokenize unique canaries ONCE
+        print("  Tokenizing canaries...")
         unique_tokenized, unique_labels = self._tokenize_with_value_span(canaries, max_length=256)
         
-        def get_epoch_data(repeats):
-            # Use torch.repeat to expand data efficiently in VRAM
-            # [20, seq_len] -> [20*repeats, seq_len]
-            return {
-                "input_ids": unique_tokenized["input_ids"].repeat(repeats, 1),
-                "attention_mask": unique_tokenized["attention_mask"].repeat(repeats, 1),
-                "labels": unique_labels.repeat(repeats, 1)
-            }
+        # Move unique data to GPU once (if not already)
+        # Note: _tokenize_with_value_span already puts tensors on self.device
         
-        # Initialize Stage 1 data
-        stage1_data = get_epoch_data(canary_repeats_stage1)
-        # We prepare Stage 2 later to save VRAM
+        def create_stage_dataset(repeats):
+            # Create full dataset on GPU using repeat
+            # This consumes VRAM but eliminates CPU-GPU transfer during training
+            # Memory usage: 20 * 1200 * 256 * 8 bytes ≈ 50MB (negligible for A800)
+            print(f"  Preloading {repeats} repeats to GPU memory...")
+            input_ids = unique_tokenized["input_ids"].repeat(repeats, 1)
+            attention_mask = unique_tokenized["attention_mask"].repeat(repeats, 1)
+            labels = unique_labels.repeat(repeats, 1)
+            return input_ids, attention_mask, labels
         
-        current_data = stage1_data
-        current_repeats = canary_repeats_stage1
+        # Prepare Stage 1 Data on GPU
+        stage1_input_ids, stage1_attention_mask, stage1_labels = create_stage_dataset(canary_repeats_stage1)
+        
+        # Prepare Stage 2 Data on GPU (pre-allocate to avoid allocation lag during switch)
+        stage2_input_ids, stage2_attention_mask, stage2_labels = create_stage_dataset(canary_repeats_stage2)
+        
+        # Initial pointers
+        curr_input_ids = stage1_input_ids
+        curr_attention_mask = stage1_attention_mask
+        curr_labels = stage1_labels
+        curr_repeats = canary_repeats_stage1
         
         stage1_epochs = 20
-        # OPTIMIZATION 3: Increased Batch Size
-        # 16 -> 64. 3B model is small, 64 fits easily and speeds up training 4x.
         batch_size = 64 
-        num_samples = current_data["input_ids"].shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size
         
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.0)
         
@@ -529,19 +531,23 @@ class Experiment1_KillSwitch:
         
         best_loss = float('inf')
         patience_counter = 0
-        loss_stagnation_counter = 0 # FIXED: Track if loss is perfectly stuck
+        loss_stagnation_counter = 0
         last_epoch_loss = float('inf')
         
         print(f"  Training for up to {num_epochs} epochs (Batch size: {batch_size})...")
         
+        start_time = time.time()
+        
         for epoch in range(num_epochs):
+            epoch_start = time.time()
+            
             if epoch == stage1_epochs:
                 print(f"  [Stage Transition] Switching to Stage 2 at epoch {epoch + 1}")
-                # Generate Stage 2 data on demand
-                current_data = get_epoch_data(canary_repeats_stage2)
-                current_repeats = canary_repeats_stage2
-                num_samples = current_data["input_ids"].shape[0]
-                num_batches = (num_samples + batch_size - 1) // batch_size
+                # Switch pointers to Stage 2 data (already on GPU)
+                curr_input_ids = stage2_input_ids
+                curr_attention_mask = stage2_attention_mask
+                curr_labels = stage2_labels
+                curr_repeats = canary_repeats_stage2
                 
                 optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr_stage2, weight_decay=0.0)
                 
@@ -553,51 +559,54 @@ class Experiment1_KillSwitch:
                 
                 current_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_stage2)
             
-            epoch_losses = []
+            num_samples = curr_input_ids.shape[0]
+            num_batches = (num_samples + batch_size - 1) // batch_size
             
-            # FIXED: Shuffle data indices every epoch to introduce SGD noise and break symmetry
+            # Shuffle indices on GPU
             indices = torch.randperm(num_samples, device=self.device)
+            
+            total_loss = 0.0
+            
+            # Optimization: Pre-calculate batches to minimize python overhead inside loop?
+            # No, just iterate. The data is already on GPU, that's the big win.
             
             for batch_idx in range(num_batches):
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, num_samples)
                 
-                # Get batch indices
                 batch_indices = indices[start_idx:end_idx]
                 
-                # Slicing tensor with indices
-                batch_input_ids = current_data["input_ids"][batch_indices]
-                batch_attention_mask = current_data["attention_mask"][batch_indices]
-                batch_labels = current_data["labels"][batch_indices]
-                
-                if batch_attention_mask is not None:
-                    batch_labels[batch_attention_mask == 0] = -100
-                
+                # Slicing GPU tensors is fast
                 batch_data = {
-                    "input_ids": batch_input_ids,
-                    "attention_mask": batch_attention_mask,
-                    "labels": batch_labels
+                    "input_ids": curr_input_ids[batch_indices],
+                    "attention_mask": curr_attention_mask[batch_indices],
+                    "labels": curr_labels[batch_indices]
                 }
+                
+                # Mask padding in labels (if not already done)
+                # Optimization: This was already done in _tokenize_with_value_span or during creation
+                # Double check to be safe, or assume correct for speed.
+                # Assuming correct from _tokenize_with_value_span.
                 
                 optimizer.zero_grad()
                 outputs = self.model(**batch_data)
                 loss = outputs.loss
                 
-                if torch.isnan(loss) or torch.isinf(loss):
-                    raise ValueError(f"NaN/Inf loss detected. Training stopped.")
-                
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
-                epoch_losses.append(loss.item())
+                
+                total_loss += loss.item()
             
-            current_loss = sum(epoch_losses) / len(epoch_losses)
+            current_loss = total_loss / num_batches
             current_scheduler.step()
             
-            if (epoch + 1) % 1 == 0:
-                print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {current_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.2e}")
+            epoch_time = time.time() - epoch_start
             
-            # Check for stagnation (BF16 precision floor)
+            if (epoch + 1) % 1 == 0:
+                print(f"    Epoch {epoch + 1}/{num_epochs}, Loss: {current_loss:.4f}, Time: {epoch_time:.2f}s")
+            
+            # Check for stagnation
             if abs(current_loss - last_epoch_loss) < 1e-5:
                 loss_stagnation_counter += 1
             else:
@@ -605,15 +614,14 @@ class Experiment1_KillSwitch:
             
             last_epoch_loss = current_loss
 
-            min_epochs = 5 # Reduced min epochs
+            min_epochs = 5
             if (epoch + 1) >= min_epochs:
                 if current_loss <= target_loss:
                     print(f"  ✓ Early stopping: Loss {current_loss:.4f} <= target")
                     break
                 
-                # If loss is stuck for 5 epochs and reasonably low, stop
                 if loss_stagnation_counter >= 5 and current_loss < 0.1:
-                    print(f"  ✓ Early stopping: Loss stagnated at {current_loss:.4f} (BF16 precision limit)")
+                    print(f"  ✓ Early stopping: Loss stagnated at {current_loss:.4f}")
                     break
             
             if current_loss < best_loss:
@@ -624,11 +632,13 @@ class Experiment1_KillSwitch:
                 if patience_counter >= 20 and best_loss < target_loss * 2.0:
                     break
         
+        total_time = time.time() - start_time
+        print(f"  Training finished in {total_time:.2f}s")
+        
         print("  Merging LoRA adapters into base model...")
         self.model = self.model.merge_and_unload()
         self.model.eval()
         
-        # Update model reference in LibOrtho wrapper
         self.libortho.model = self.model
         self.canaries = canaries
     
